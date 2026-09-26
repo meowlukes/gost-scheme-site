@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Блок-схема из кода Pascal по ГОСТ 19.701-90</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<script src="vendor/jspdf.umd.min.js" defer></script>
+<script src="vendor/jszip.min.js" defer></script>
+<style>
+:root {
+  --desk: #D7DDD5; --panel: #F3F5F1; --paper: #FFFFFF; --ink: #1D2421; --graphite: #59625E; --rule: #C3CAC2; --rule-2: #DCE1DA;
+  --pen: #2447B5; --on-pen: #FFFFFF; --pen-soft: #E3E9F8; --red: #BF3328; --red-soft: #F8E4E1; --ok: #2E7250; --grid: #E4A27A;
+  --ui: "PT Sans", "Segoe UI", system-ui, sans-serif; --mono: "PT Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --desk: #262B29; --panel: #1C2120; --paper: #242A28; --ink: #E7EBE8; --graphite: #A3ACA7; --rule: #3A423E; --rule-2: #2E3532; --pen: #8DA6F2; --on-pen: #0E1630; --pen-soft: #2A3452; --red: #F0877C; --ok: #7CC7A0; color-scheme: dark; }
+}
+:root[data-theme="dark"] { --desk: #262B29; --panel: #1C2120; --paper: #242A28; --on-pen: #0E1630; --ink: #E7EBE8; --graphite: #A3ACA7; --rule: #3A423E; --rule-2: #2E3532; --pen: #8DA6F2; --pen-soft: #2A3452; --red: #F0877C; --ok: #7CC7A0; color-scheme: dark; }
+*, *::before, *::after { box-sizing: inherit; }
+html { height: 100%; scroll-padding-top: env(safe-area-inset-top, 0px); }
+body { margin: 0; height: 100%; background: var(--desk); color: var(--ink); font: 15px/1.45 var(--ui); -webkit-font-smoothing: antialiased; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--pen); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.app { display: grid; grid-template-columns: minmax(300px, 30%) minmax(0, 1fr) 320px; grid-template-rows: auto minmax(0, 1fr); height: 100%; }
+header.top { grid-column: 1 / -1; display: flex; align-items: center; gap: 20px; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.brand { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-right: auto; }
+.brand h1 { margin: 0; font-size: 19px; font-weight: 700; letter-spacing: 0.005em; }
+.brand p { margin: 0; color: var(--graphite); font-size: 14px; }
+.top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.btn { height: 32px; padding: 0 12px; border: 1px solid var(--rule); background: var(--paper); border-radius: 4px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.btn:hover { border-color: var(--graphite); }
+.btn.primary { background: var(--pen); border-color: var(--pen); color: var(--on-pen); font-weight: 700; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { color: var(--red); }
+.btn:disabled { opacity: .45; cursor: default; }
+select.btn { padding-right: 8px; }
+.pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px 8px; }
+.pane-head h2 { margin: 0; font-size: 15px; font-weight: 700; }
+.hint { color: var(--graphite); font-size: 13px; }
+
+/* ---- код ---- */
+.code-pane { background: var(--panel); border-right: 1px solid var(--rule); }
+.editor { position: relative; flex: 1 1 auto; min-height: 220px; margin: 0 14px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); display: flex; overflow: hidden; }
+:root[data-theme="dark"] .editor { background: #161a19; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .editor { background: #161a19; } }
+.gutter { flex: 0 0 auto; padding: 10px 8px 10px 10px; text-align: right; color: var(--graphite); background: var(--rule-2); font: 13px/20px var(--mono); white-space: pre; overflow: hidden; user-select: none; min-width: 42px; }
+.gutter .err { color: var(--red); font-weight: 700; }
+.ed-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
+.ed-wrap pre, .ed-wrap textarea { position: absolute; inset: 0; margin: 0; padding: 10px 12px; font: 13px/20px var(--mono); white-space: pre; tab-size: 2; overflow: auto; border: 0; }
+.ed-wrap pre { pointer-events: none; color: var(--ink); overflow: hidden; }
+.ed-wrap textarea { resize: none; background: transparent; color: transparent; caret-color: var(--ink); outline: none; }
+.ed-wrap textarea::selection { background: rgba(36, 71, 181, .22); color: transparent; }
+.hl .k { color: var(--pen); } .hl .s { color: #9A3B12; } .hl .n { color: #1C6B4A; } .hl .c { color: #7B8580; font-style: italic; }
+:root[data-theme="dark"] .hl .s { color: #E5A07B; } :root[data-theme="dark"] .hl .n { color: #8FD1AE; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .hl .s { color: #E5A07B; } :root:not([data-theme="light"]) .hl .n { color: #8FD1AE; } }
+.code-foot { padding: 10px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.msgs { font-size: 13px; max-height: 150px; overflow: auto; }
+.msgs:empty { display: none; }
+.msg { display: flex; gap: 8px; padding: 3px 0; }
+.msg button { border: 0; background: none; padding: 0; color: var(--red); text-decoration: underline; font-family: var(--mono); font-size: 12px; }
+.msg.info { color: var(--graphite); }
+details.settings { border-top: 1px solid var(--rule); padding-top: 8px; }
+details.settings summary { cursor: pointer; font-weight: 700; font-size: 14px; }
+.setrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; font-size: 14px; }
+.setrow input[type=number] { width: 70px; height: 28px; padding: 0 6px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); }
+
+/* ---- доска ---- */
+.board-pane { background: var(--desk); }
+.tabs { flex: 0 0 auto; display: flex; gap: 2px; padding: 8px 12px 0; overflow-x: auto; scrollbar-width: thin; }
+.tab { border: 1px solid var(--rule); border-bottom: 0; background: color-mix(in srgb, var(--panel) 70%, var(--desk)); padding: 6px 12px 7px; border-radius: 4px 4px 0 0; text-align: left; line-height: 1.2; min-width: 0; }
+.tab small { display: block; color: var(--graphite); font-size: 12px; }
+.tab span { white-space: nowrap; font-size: 14px; }
+.tab[aria-selected=true] { background: var(--panel); box-shadow: inset 0 3px 0 var(--pen); }
+.toolbar { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px; background: var(--panel); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.tgroup { display: flex; gap: 2px; align-items: center; }
+.tsep { width: 1px; height: 22px; background: var(--rule); margin: 0 4px; }
+.tbtn { height: 30px; min-width: 32px; padding: 0 6px; border: 1px solid transparent; background: transparent; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-size: 13px; color: var(--ink); }
+.tbtn:hover { border-color: var(--rule); background: var(--paper); }
+.tbtn[aria-pressed=true] { border-color: var(--pen); background: var(--pen-soft); color: var(--pen); }
+.tbtn svg { width: 26px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.2; }
+.zoomval { min-width: 44px; text-align: center; font-size: 13px; color: var(--graphite); font-variant-numeric: tabular-nums; }
+.banner { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 12px; font-size: 14px; background: var(--pen-soft); border-bottom: 1px solid var(--rule); }
+.banner[hidden] { display: none; }
+.board { position: relative; flex: 1 1 auto; overflow: auto; min-height: 0; touch-action: pan-x pan-y pinch-zoom; }
+.board svg .bk, .board svg .lb, .board svg .cm, .board svg .hit, .board svg [data-part], .board[data-tool=line] svg, .board[data-tool=add] svg { touch-action: none; }
+.board svg { display: block; margin: 0 auto; }
+.board svg text { font-family: "Times New Roman", Tinos, "Liberation Serif", serif; }
+.board .dims text { font-family: var(--ui); }
+.board .bk, .board .lb, .board .cm, .board .hit { cursor: move; }
+.board[data-tool=line] svg, .board[data-tool=line] .bk { cursor: crosshair; }
+.board[data-tool^=add] svg, .board[data-tool^=add] .bk { cursor: copy; }
+.empty-state[hidden] { display: none; }
+.empty-state { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--graphite); padding: 30px; }
+.statusbar { flex: 0 0 auto; display: flex; gap: 18px; flex-wrap: wrap; padding: 6px 12px; font-size: 13px; color: var(--graphite); background: var(--panel); border-top: 1px solid var(--rule); }
+.statusbar .bad { color: var(--red); font-weight: 700; }
+.statusbar .manual { color: var(--pen); margin-left: auto; }
+.linkbtn { border: 0; background: none; padding: 0; color: var(--pen); text-decoration: underline; font-size: 13px; }
+
+/* ---- боковая панель ---- */
+.side-pane { background: var(--panel); border-left: 1px solid var(--rule); }
+.side-tabs { display: flex; border-bottom: 1px solid var(--rule); padding: 0 8px; }
+.side-tabs button { flex: 1; border: 0; background: none; padding: 11px 4px 9px; font-size: 14px; color: var(--graphite); border-bottom: 3px solid transparent; }
+.side-tabs button[aria-selected=true] { color: var(--ink); font-weight: 700; border-bottom-color: var(--pen); }
+.side-body { flex: 1 1 auto; overflow: auto; padding: 14px; }
+.side-body h3 { margin: 0 0 8px; font-size: 15px; }
+.side-body h4 { margin: 18px 0 6px; font-size: 13px; color: var(--graphite); font-weight: 700; }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 13px; color: var(--graphite); }
+.field textarea, .field input[type=text], .field select { color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); padding: 6px 8px; font-size: 14px; }
+.field textarea { min-height: 76px; resize: vertical; font-family: "Times New Roman", Tinos, serif; font-size: 16px; line-height: 1.35; }
+.actions { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.actions .btn { justify-content: flex-start; }
+.check { list-style: none; padding: 0; margin: 0; font-size: 14px; }
+.check li { display: flex; gap: 8px; padding: 4px 0; }
+.check li::before { content: "✓"; color: var(--ok); font-weight: 700; flex: 0 0 auto; }
+.check li.no::before { content: "!"; color: var(--red); width: 10px; text-align: center; }
+.kbd { font-family: var(--mono); font-size: 12px; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: var(--paper); }
+.help { font-size: 13px; color: var(--graphite); line-height: 1.5; }
+.help p { margin: 0 0 6px; }
+table.names { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.names th { text-align: left; font-weight: 700; color: var(--graphite); padding: 12px 0 4px; }
+table.names td { padding: 3px 3px 3px 0; vertical-align: middle; }
+table.names td:first-child { font-family: var(--mono); font-size: 12px; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.names input { width: 100%; height: 28px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); padding: 0 6px; font-size: 14px; }
+table.names input.disp { font-family: "Times New Roman", Tinos, serif; font-size: 15px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; flex-wrap: wrap; }
+.seg button { border: 0; background: var(--paper); padding: 5px 10px; font-size: 13px; border-right: 1px solid var(--rule); }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed=true] { background: var(--pen); color: var(--on-pen); }
+.seg button:disabled { opacity: .4; cursor: default; }
+.exprow { margin-bottom: 12px; }
+.exprow > div:first-child { font-size: 13px; color: var(--graphite); margin-bottom: 4px; }
+.expinfo { font-size: 13px; color: var(--graphite); background: var(--rule-2); border-radius: 4px; padding: 8px 10px; margin: 10px 0; }
+#toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--panel); padding: 8px 14px; border-radius: 4px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 90vw; }
+#toast.show { opacity: 1; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+@media (max-width: 1180px) {
+  .app { grid-template-columns: minmax(280px, 36%) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; height: auto; min-height: 100%; }
+  .code-pane { grid-row: 2; } .board-pane { grid-row: 2; min-height: 78vh; }
+  .side-pane { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--rule); }
+  .side-body { max-height: none; }
+}
+@media (max-width: 760px) {
+  .app { display: flex; flex-direction: column; height: auto; }
+  .code-pane { border-right: 0; border-bottom: 1px solid var(--rule); }
+  .editor { min-height: 300px; height: 44vh; flex: 0 0 auto; }
+  .board-pane { min-height: 80vh; }
+  .brand p { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1>Блок-схема из кода Pascal</h1>
+      <p>по ГОСТ 19.701-90 и правилам «Схемы программы (алгоритмов)»</p>
+    </div>
+    <div class="top-actions">
+      <label class="sr" for="exampleSel">Пример программы</label>
+      <select id="exampleSel" class="btn"></select>
+      <button id="openBtn" class="btn" type="button">Открыть файл .pas</button>
+      <input id="fileIn" type="file" accept=".pas,.pp,.lpr,.dpr,.inc,.txt,text/plain" hidden>
+    </div>
+  </header>
+
+  <section class="pane code-pane" aria-label="Код программы">
+    <div class="pane-head">
+      <h2>Код программы</h2>
+      <button id="buildBtn" class="btn primary" type="button" title="Ctrl+Enter">Построить схему</button>
+    </div>
+    <div class="editor">
+      <div class="gutter" id="gutter" aria-hidden="true"></div>
+      <div class="ed-wrap"><pre class="hl" id="hl" aria-hidden="true"></pre><textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Текст программы на Pascal"></textarea></div>
+    </div>
+    <div class="code-foot">
+      <div class="msgs" id="msgs" aria-live="polite"></div>
+      <details class="settings">
+        <summary>Настройки построения</summary>
+        <div class="setrow"><span>Действий в одном блоке, не больше</span><span class="seg" id="setMerge"><button type="button" data-v="1">1</button><button type="button" data-v="2">2</button><button type="button" data-v="3">3</button></span></div>
+        <div class="setrow"><label for="setCollapse">Циклы ввода и вывода массивов — одним блоком</label><input type="checkbox" id="setCollapse"></div>
+        <div class="setrow"><label for="setMaxH">Высота колонки до переноса, мм</label><input type="number" id="setMaxH" min="120" max="400" step="5"></div>
+        <div class="setrow"><label for="setAuto">Перестраивать при изменении кода</label><input type="checkbox" id="setAuto"></div>
+        <p class="hint">Всё, что вы меняете на схеме, сохраняется в этом браузере.</p>
+      </details>
+    </div>
+  </section>
+
+  <section class="pane board-pane" aria-label="Схема">
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Схемы"></nav>
+    <div class="toolbar" id="toolbar">
+      <div class="tgroup" role="group" aria-label="Инструменты">
+        <button class="tbtn" data-tool="select" title="Выбор и перемещение (V)" aria-pressed="true"><svg viewBox="0 0 26 16"><path d="M9 2l8 7h-4l2 5-2 1-2-5-3 3z" fill="currentColor" stroke="none"/></svg></button>
+        <button class="tbtn" data-tool="add:term" title="Начало / Конец"><svg viewBox="0 0 26 16"><rect x="2" y="4.5" width="22" height="7" rx="3.5"/></svg></button>
+        <button class="tbtn" data-tool="add:rect" title="Процесс, ввод, вывод"><svg viewBox="0 0 26 16"><rect x="3" y="2.5" width="20" height="11"/></svg></button>
+        <button class="tbtn" data-tool="add:dia" title="Условие"><svg viewBox="0 0 26 16"><path d="M2 8L13 2.5 24 8 13 13.5z"/></svg></button>
+        <button class="tbtn" data-tool="add:lbeg" title="Начало цикла"><svg viewBox="0 0 26 16"><path d="M3 6l3-3.5h14l3 3.5v7.5H3z"/></svg></button>
+        <button class="tbtn" data-tool="add:lend" title="Конец цикла"><svg viewBox="0 0 26 16"><path d="M3 2.5h20V10l-3 3.5H6L3 10z"/></svg></button>
+        <button class="tbtn" data-tool="add:conn" title="Перенос (круг с буквой)"><svg viewBox="0 0 26 16"><circle cx="13" cy="8" r="5.5"/></svg></button>
+        <button class="tbtn" data-tool="add:label" title="Подпись «Да»/«Нет»"><svg viewBox="0 0 26 16"><text x="4" y="12" font-size="10" fill="currentColor" stroke="none" font-family="PT Sans">Да</text></svg></button>
+        <button class="tbtn" data-tool="line" title="Линия: щелчки по точкам, двойной щелчок — завершить (L)"><svg viewBox="0 0 26 16"><path d="M4 3v6h18v5"/></svg></button>
+      </div>
+      <div class="tsep"></div>
+      <div class="tgroup">
+        <button class="tbtn" id="undoBtn" title="Отменить (Ctrl+Z)"><svg viewBox="0 0 26 16"><path d="M8 4L4 8l4 4M4 8h11a5 4 0 010 8h-2"/></svg></button>
+        <button class="tbtn" id="redoBtn" title="Повторить (Ctrl+Shift+Z)"><svg viewBox="0 0 26 16"><path d="M18 4l4 4-4 4M22 8H11a5 4 0 000 8h2"/></svg></button>
+      </div>
+      <div class="tsep"></div>
+      <div class="tgroup">
+        <button class="tbtn" id="zoomOut" title="Уменьшить">−</button>
+        <span class="zoomval" id="zoomVal">100%</span>
+        <button class="tbtn" id="zoomIn" title="Увеличить">+</button>
+        <button class="tbtn" id="zoomFit" title="Уместить по ширине">По ширине</button>
+        <button class="tbtn" id="zoom1" title="Натуральный размер (при 96 точках на дюйм)">1:1</button>
+      </div>
+      <div class="tsep"></div>
+      <button class="tbtn" id="gridBtn" aria-pressed="true" title="Миллиметровая сетка">Сетка</button>
+    </div>
+    <div class="board" id="boardWrap" data-tool="select">
+      <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="empty-state" id="emptyState" hidden></div>
+    </div>
+    <div class="statusbar" id="status"></div>
+  </section>
+
+  <aside class="pane side-pane" aria-label="Свойства и экспорт">
+    <div class="side-tabs" role="tablist">
+      <button type="button" data-side="props" aria-selected="true">Свойства</button>
+      <button type="button" data-side="names" aria-selected="false">Обозначения</button>
+      <button type="button" data-side="export" aria-selected="false">Экспорт</button>
+    </div>
+    <div class="side-body" id="side"></div>
+  </aside>
+</div>
+<div id="toast" role="status"></div>
+<script>
+/*__APP__*/
+</script>
+</body>
+</html>

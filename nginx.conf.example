@@ -1,0 +1,30 @@
+# Пример настройки nginx для сайта «Блок-схема из кода Pascal».
+# Скопируйте содержимое папки на сервер, например в /var/www/gost-scheme,
+# и подключите этот блок в /etc/nginx/sites-available/.
+server {
+    listen 80;
+    server_name scheme.example.ru;          # ваш домен
+
+    root /var/www/gost-scheme;
+    index index.html;
+
+    charset utf-8;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Шрифты и библиотеки не меняются — кэшируем надолго
+    location ~* \.(woff2|js|css)$ {
+        expires 30d;
+        add_header Cache-Control "public";
+    }
+
+    # Сама страница — без долгого кэша, чтобы обновления были видны сразу
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
+    gzip on;
+    gzip_types text/html text/css application/javascript;
+}
