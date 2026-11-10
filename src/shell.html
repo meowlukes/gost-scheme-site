@@ -73,6 +73,9 @@ details.settings summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .setrow.start { justify-content: flex-start; }
 .setrow select { max-width: 58%; height: 28px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); padding: 0 4px; font-size: 13px; }
 .hint.gap { margin-top: 12px; }
+.notes { margin-top: 4px; } .notes summary { cursor: pointer; font-size: 12.5px; color: var(--graphite); padding: 2px 0; }
+.tab.stale small::after { content: " • устарела"; color: var(--red); }
+.status .manual.bad { color: var(--red); }
 .hint .bad { color: var(--red); }
 .check small { color: var(--graphite); white-space: nowrap; }
 .setrow input[type=number] { width: 70px; height: 28px; padding: 0 6px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); }
@@ -215,6 +218,7 @@ table.names input.disp { font-family: var(--scheme-font); font-size: 15px; }
         <div class="setrow"><label for="setCollapse">Циклы ввода и вывода массивов — одним блоком</label><input type="checkbox" id="setCollapse"></div>
         <div class="setrow"><label for="setMaxH">Высота колонки до переноса, мм</label><input type="number" id="setMaxH" min="120" max="400" step="5"></div>
         <div class="setrow"><label for="setAuto">Перестраивать при изменении кода</label><input type="checkbox" id="setAuto"></div>
+        <div class="setrow"><label for="setSplit">Выносить длинные ветви через соединители</label><input type="checkbox" id="setSplit"></div>
         <div class="setrow"><label for="set-ioSymbol">Ввод и вывод</label><select id="set-ioSymbol"></select></div>
         <div class="setrow"><label for="set-callSymbol">Вызов своей подпрограммы</label><select id="set-callSymbol"></select></div>
         <div class="setrow"><label for="set-caseStyle">Оператор выбора case</label><select id="set-caseStyle"></select></div>

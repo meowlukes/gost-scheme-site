@@ -4,15 +4,17 @@
  */
 import { EXAMPLES } from '../core/examples.js';
 import { CALL_SYMBOLS, CASE_STYLES, COLUMN_HEIGHT_RANGE, IO_SYMBOLS, MERGE_RANGE, defaultOptions, normalizeOptions } from '../core/options.js';
-import { RESERVED } from '../core/parser.js';
 import { autoCommentText, buildGeometry, buildProject, collectNames, commentHeight, geomBounds, makeComment, newId, renumber } from '../core/project.js';
 import { checkGeometry } from '../core/validate.js';
 import { GOST, TEXTS } from '../gost/index.js';
-import { canvasBlob, jpegWithDpi, pngWithDpi, sceneToCanvas } from '../render/canvas.js';
+import { canvasBlob } from '../render/canvas.js';
 import { buildScene } from '../render/scene.js';
-import { escapeXml as esc, sceneToSvg, sceneToSvgFile } from '../render/svg.js';
+import { escapeXml as esc, sceneToSvg } from '../render/svg.js';
 import { createTextEngine } from '../render/text.js';
-import { EXPORT, STORAGE_KEY, STATE_VERSION, TIMING, UNDO_DEPTH, VENDOR, ZOOM } from './config.js';
+import { EXPORT, STORAGE_KEY, STATE_VERSION, TIMING, UNDO_DEPTH, ZOOM } from './config.js';
+import { canBeTransparent, createExporter, exportLook, isRaster, loadVendor } from './export.js';
+import { highlight } from './highlight.js';
+import { cleanPts, moveEnd, moveSegment, moveVertex, snap } from './polyline.js';
 import { sanitizeState } from './state.js';
 
 const gost = GOST;
@@ -81,20 +83,6 @@ let toastT = null;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), TIMING.toast); }
 
 // ---------- редактор кода ----------
-function highlight(src) {
-  const re = /(\{[\s\S]*?(?:\}|$)|\(\*[\s\S]*?(?:\*\)|$)|\/\/[^\n]*)|('(?:[^'\n]|'')*'?|#\$?[0-9A-Fa-f]+)|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b|\$[0-9A-Fa-f]+)|([A-Za-z_\u0400-\u04FF][\w\u0400-\u04FF]*)/g;
-  let out = '', last = 0, m;
-  while ((m = re.exec(src))) {
-    out += esc(src.slice(last, m.index));
-    if (m[1]) out += `<span class="c">${esc(m[1])}</span>`;
-    else if (m[2]) out += `<span class="s">${esc(m[2])}</span>`;
-    else if (m[3]) out += `<span class="n">${esc(m[3])}</span>`;
-    else if (m[4]) out += RESERVED.has(m[4].toLowerCase()) ? `<span class="k">${esc(m[4])}</span>` : esc(m[4]);
-    last = re.lastIndex;
-    if (m[0].length === 0) re.lastIndex++;
-  }
-  return out + esc(src.slice(last)) + '\n';
-}
 let errLines = new Set();
 function refreshEditor() {
   hlEl.innerHTML = highlight(codeEl.value);
@@ -117,6 +105,7 @@ codeEl.addEventListener('keydown', e => {
 /** Сколько строк оставить над строкой, к которой переходим. */
 const CONTEXT_LINES = 5;
 const MAX_MESSAGES = 12;
+const MAX_NOTES = 40;
 function gotoLine(line) {
   const lines = codeEl.value.split('\n'); let pos = 0;
   for (let i = 0; i < line - 1 && i < lines.length; i++) pos += lines[i].length + 1;
@@ -144,7 +133,7 @@ function syncManualTexts(id) {
 function rebuild() {
   clearTimeout(buildT);
   try { project = buildProject(S.code, env()); }
-  catch (e) { project = { diagrams: [], errors: [{ line: 1, msg: 'Не удалось разобрать программу: ' + e.message }] }; }
+  catch (e) { project = { diagrams: [], notes: [], errors: [{ line: 1, msg: 'Не удалось разобрать программу: ' + e.message }] }; }
   geoms = {};
   for (const d of project.diagrams) if (!d.empty) { try { geoms[d.id] = buildGeometry(d, env()); } catch (e) { d.empty = true; project.errors.push({ line: d.line, msg: 'не удалось построить схему: ' + e.message }); } }
   syncAll();
@@ -154,7 +143,23 @@ function rebuild() {
   if (sel && G() && !G().items.find(i => i.id === sel)) sel = null;
   renderTabs(); renderMsgs(); renderBoard(); renderSide(); save();
 }
-function syncAll() { for (const id in S.manual) syncManualTexts(id); }
+/** Состав автоматической схемы: по нему видно, что программа изменилась по существу. */
+const structureOf = g => g.items.filter(i => i.type === 'block' && i.key).map(i => i.key + ':' + i.shape).sort().join('|');
+/**
+ * Сверяет ручные схемы с программой. Ручная раскладка хранит геометрию на момент правки;
+ * если после этого изменился состав блоков, схема помечается как устаревшая, чтобы
+ * пользователь не сохранил рисунок, не соответствующий коду.
+ */
+function syncAll() {
+  for (const id in S.manual) {
+    syncManualTexts(id);
+    const man = S.manual[id], auto = geoms[id];
+    if (!man || !auto) continue;
+    const now = structureOf(auto);
+    if (man.autoStructure === undefined) man.autoStructure = now; // сохранение прежней версии сайта
+    man.stale = man.autoStructure !== now;
+  }
+}
 
 // ---------- сообщения ----------
 function renderMsgs() {
@@ -166,6 +171,14 @@ function renderMsgs() {
   const skipped = project ? project.diagrams.filter(d => d.empty) : [];
   if (skipped.length) h += `<div class="msg info">Без схемы (нет действий, влияющих на алгоритм): ${skipped.map(d => esc(d.R ? d.R.short : 'основная программа')).join(', ')}</div>`;
   if (project && !project.diagrams.length && S.code.trim()) h += `<div class="msg info">В тексте не найдено ни основной программы, ни подпрограмм с телом begin…end.</div>`;
+  // что из программы не попало на схему или показано упрощённо
+  const notes = (project && project.notes) || [];
+  if (notes.length) {
+    h += `<details class="notes"><summary>Показано не всё: ${notes.length}</summary>`;
+    for (const n of notes.slice(0, MAX_NOTES)) h += `<div class="msg info"><button type="button" data-line="${n.line}">строка ${n.line}</button><span>${esc(n.msg)}</span></div>`;
+    if (notes.length > MAX_NOTES) h += `<div class="msg info">и ещё ${notes.length - MAX_NOTES}</div>`;
+    h += '</details>';
+  }
   box.innerHTML = h;
   box.querySelectorAll('button[data-line]').forEach(b => b.onclick = () => gotoLine(+b.dataset.line));
   refreshEditor();
@@ -176,7 +189,8 @@ function figNo(id) { return visibleDiags().findIndex(d => d.id === id) + 1; }
 function captionOf(d) { const e = S.edits[d.id]; return (e && e.caption) || `Рисунок ${figNo(d.id)} – ${d.title}`; }
 function renderTabs() {
   const box = $('#tabs'); const vis = visibleDiags();
-  box.innerHTML = vis.map((d, i) => `<button class="tab" role="tab" type="button" data-id="${esc(d.id)}" aria-selected="${d.id === S.active}"><small>Рисунок ${i + 1}</small><span>${esc(d.title)}</span></button>`).join('');
+  const stale = d => !!(S.manual[d.id] && S.manual[d.id].stale);
+  box.innerHTML = vis.map((d, i) => `<button class="tab${stale(d) ? ' stale' : ''}" role="tab" type="button" data-id="${esc(d.id)}" aria-selected="${d.id === S.active}"${stale(d) ? ' title="Ручная схема не соответствует программе"' : ''}><small>Рисунок ${i + 1}</small><span>${esc(d.title)}</span></button>`).join('');
   box.querySelectorAll('.tab').forEach(b => b.onclick = () => { S.active = b.dataset.id; sel = null; draft = null; S.ui.zoom = null; renderTabs(); renderBoard(); renderSide(); save(); });
 }
 
@@ -284,7 +298,8 @@ function renderStatus(g, b, overflow) {
   if (overflow.length) parts.push(`<span class="bad">Текст не помещается: ${overflow.length}</span>`);
   if (tool === 'line') parts.push('<span>Линия: щёлкайте по точкам; двойной щелчок или Enter — завершить, Esc — отменить</span>');
   else if (tool.startsWith('add')) parts.push('<span>Щёлкните на листе, чтобы поставить элемент</span>');
-  if (isManual()) parts.push('<span class="manual">Схема правилась вручную <button type="button" class="linkbtn" id="resetManual">вернуть автоматическую раскладку</button></span>');
+  if (isManual() && g.stale) parts.push('<span class="manual bad" id="staleNote">Программа изменилась — ручная схема ей больше не соответствует <button type="button" class="linkbtn" id="resetManual">построить заново</button></span>');
+  else if (isManual()) parts.push('<span class="manual">Схема правилась вручную <button type="button" class="linkbtn" id="resetManual">вернуть автоматическую раскладку</button></span>');
   $('#status').innerHTML = parts.join('');
   const rb = $('#resetManual'); if (rb) rb.onclick = resetManual;
 }
@@ -292,7 +307,7 @@ function renderStatus(g, b, overflow) {
 // ---------- ручной режим ----------
 function ensureManual() {
   if (!S.active) return null;
-  if (!S.manual[S.active]) { const g = clone(geoms[S.active]); g.manual = true; S.manual[S.active] = g; }
+  if (!S.manual[S.active]) { const g = clone(geoms[S.active]); g.manual = true; g.autoStructure = structureOf(geoms[S.active]); g.stale = false; S.manual[S.active] = g; }
   return S.manual[S.active];
 }
 function confirmRelayout() {
@@ -304,7 +319,6 @@ function resetManual() { if (!confirm('Вернуть автоматическу
 
 // ---------- координаты ----------
 function svgPoint(ev) { const pt = board.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY; const p = pt.matrixTransform(board.getScreenCTM().inverse()); return [p.x, p.y]; }
-const snap = (v, st) => Math.round(v / st) * st;
 /** Точки присоединения линий к символу: середины сторон (п. 4.2.4). */
 function ports(b) { const p = SYM.ports(b.shape, b.x, b.y); return [p.top, p.bottom, p.left, p.right]; }
 function onBoundary(b, p) { return SYM.onBoundary(b.shape, p[0] - b.x, p[1] - b.y, TOL.boundary); }
@@ -313,69 +327,6 @@ function nearestPort(g, x, y, r) {
   for (const b of g.items) if (b.type === 'block') for (const q of ports(b)) { const d = Math.hypot(q[0] - x, q[1] - y); if (d < bd) { bd = d; best = q; } }
   return best;
 }
-function cleanPts(pts) {
-  const res = [];
-  for (const p of pts) { const l = res[res.length - 1]; if (!l || Math.hypot(l[0] - p[0], l[1] - p[1]) > 1e-6) res.push([Math.round(p[0] * 1000) / 1000, Math.round(p[1] * 1000) / 1000]); }
-  let changed = true;
-  while (changed && res.length > 2) {
-    changed = false;
-    for (let k = 1; k + 1 < res.length; k++) {
-      const a = res[k - 1], b = res[k], c = res[k + 1];
-      if ((Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(b[0] - c[0]) < 1e-6) || (Math.abs(a[1] - b[1]) < 1e-6 && Math.abs(b[1] - c[1]) < 1e-6)) { res.splice(k, 1); changed = true; break; }
-    }
-  }
-  return res;
-}
-function moveEnd(orig, end, dx, dy) {
-  const pts = orig.map(p => p.slice()); const n = pts.length;
-  const k = end === 0 ? 0 : n - 1, nb = end === 0 ? 1 : n - 2;
-  const vert = Math.abs(orig[k][0] - orig[nb][0]) < 1e-6;
-  const p = [orig[k][0] + dx, orig[k][1] + dy];
-  if (n === 2) {
-    const other = orig[nb].slice();
-    if ((vert && Math.abs(dx) < 1e-6) || (!vert && Math.abs(dy) < 1e-6)) { pts[k] = p; return pts; }
-    let mid;
-    if (vert) { const my = snap((p[1] + other[1]) / 2, HALF); mid = [[p[0], my], [other[0], my]]; }
-    else { const mx = snap((p[0] + other[0]) / 2, HALF); mid = [[mx, p[1]], [mx, other[1]]]; }
-    return end === 0 ? [p, ...mid, other] : [other, ...mid.reverse(), p];
-  }
-  pts[k] = p;
-  if (vert) pts[nb][0] = orig[nb][0] + dx; else pts[nb][1] = orig[nb][1] + dy;
-  return pts;
-}
-function moveVertex(orig, k, q) {
-  const pts = orig.map(p => p.slice()); const n = pts.length;
-  pts[k] = q.slice();
-  const fix = (j) => {
-    const vert = Math.abs(orig[j][0] - orig[k][0]) < 1e-6;
-    const isEnd = j === 0 || j === n - 1;
-    if (!isEnd) { if (vert) pts[j][0] = q[0]; else pts[j][1] = q[1]; return null; }
-    if ((vert && Math.abs(pts[j][0] - q[0]) < 1e-6) || (!vert && Math.abs(pts[j][1] - q[1]) < 1e-6)) return null;
-    return vert ? [pts[j][0], q[1]] : [q[0], pts[j][1]];
-  };
-  const ea = k > 0 ? fix(k - 1) : null, eb = k < n - 1 ? fix(k + 1) : null;
-  const res = [];
-  for (let i = 0; i < n; i++) { if (i === k && ea) res.push(ea); res.push(pts[i]); if (i === k && eb) res.push(eb); }
-  return res;
-}
-function moveSegment(orig, k, dx, dy) {
-  const n = orig.length;
-  const vert = Math.abs(orig[k][0] - orig[k + 1][0]) < 1e-6;
-  const off = vert ? [dx, 0] : [0, dy];
-  if (n === 2) return orig.map(p => [p[0] + off[0], p[1] + off[1]]);
-  const mv = p => [p[0] + off[0], p[1] + off[1]];
-  if (k > 0 && k + 1 < n - 1) { const pts = orig.map(p => p.slice()); pts[k] = mv(orig[k]); pts[k + 1] = mv(orig[k + 1]); return pts; }
-  const jog = (A, B) => { // A — закреплённый конец, B — следующая точка
-    const len = vert ? B[1] - A[1] : B[0] - A[0];
-    const s = Math.sign(len) * Math.min(GRID, Math.abs(len) / 2);
-    const J1 = vert ? [A[0], A[1] + s] : [A[0] + s, A[1]];
-    return [A, J1, mv(J1), mv(B)];
-  };
-  if (k === 0) { const head = jog(orig[0], orig[1]); return head.concat(orig.slice(2).map(p => p.slice())); }
-  const rev = orig.slice().reverse(); const head = jog(rev[0], rev[1]);
-  return head.concat(rev.slice(2).map(p => p.slice())).reverse();
-}
-
 // ---------- указатель ----------
 board.addEventListener('pointerdown', ev => {
   if (ev.pointerType === 'mouse' && ev.button !== 0) return;
@@ -483,7 +434,7 @@ function updateTJ(g) {
     }
     if (best === null) { L.pts = clone(t.pts); continue; }
     const d = best - t.coord;
-    L.pts = Math.abs(d) < 1e-9 ? clone(t.pts) : moveEnd(t.pts, t.end, t.vert ? d : 0, t.vert ? 0 : d);
+    L.pts = Math.abs(d) < 1e-9 ? clone(t.pts) : moveEnd(t.pts, t.end, t.vert ? d : 0, t.vert ? 0 : d, HALF);
   }
 }
 function applyDrag(dx, dy, fine) {
@@ -494,7 +445,7 @@ function applyDrag(dx, dy, fine) {
     it.x = o.x + sx; it.y = o.y + sy;
     for (const a of drag.att) {
       const l = g.items.find(i => i.id === a.id); if (!l) continue;
-      l.pts = a.both ? a.pts.map(p => [p[0] + sx, p[1] + sy]) : moveEnd(a.pts, a.end === 0 ? 0 : 1, sx, sy);
+      l.pts = a.both ? a.pts.map(p => [p[0] + sx, p[1] + sy]) : moveEnd(a.pts, a.end === 0 ? 0 : 1, sx, sy, HALF);
     }
     for (const w of drag.owned) { const ob = g.items.find(i => i.id === w.id); if (!ob) continue; if (ob.type === 'label') { ob.x = w.o.x + sx; ob.y = w.o.y + sy; } else { ob.bx = w.o.bx + sx; ob.by = w.o.by + sy; } }
     updateTJ(g);
@@ -807,13 +758,7 @@ function rebuildKeepSide() {
 }
 
 // ---------- экспорт ----------
-const isRaster = fmt => fmt !== 'svg';
-const canBeTransparent = fmt => EXPORT.transparent.includes(fmt);
-/** Параметры изображения с учётом ограничений формата. */
-function exportLook(E) {
-  const bg = canBeTransparent(E.fmt) ? E.bg : 'white';
-  return { background: bg === 'white', fill: bg === 'transparent' ? E.fill : 'white', bg };
-}
+const exporter = createExporter(gost, text);
 function renderExport() {
   const g = G();
   if (!g) { sideEl.innerHTML = '<p class="help">Сначала постройте схему.</p>'; return; }
@@ -843,51 +788,6 @@ function renderExport() {
   sideEl.querySelector('#eAll').onclick = () => exportAll();
   sideEl.querySelector('#eCopy').onclick = () => copyPng();
 }
-function safeName(s) { return s.replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_').replace(/–/g, '-').slice(0, EXPORT.fileNameLength); }
-
-/** Библиотеки экспорта подгружаются только при первом обращении. */
-const vendorLoads = new Map();
-function loadVendor(name) {
-  const lib = VENDOR[name];
-  if (window[lib.global]) return Promise.resolve(window[lib.global]);
-  if (!vendorLoads.has(name)) {
-    vendorLoads.set(name, new Promise((resolve, reject) => {
-      const el = document.createElement('script');
-      el.src = lib.src;
-      el.onload = () => (window[lib.global] ? resolve(window[lib.global]) : reject(new Error(`Модуль ${lib.title} не загрузился`)));
-      el.onerror = () => { vendorLoads.delete(name); reject(new Error(`Не удалось загрузить модуль ${lib.title} — проверьте соединение`)); };
-      document.head.append(el);
-    }));
-  }
-  return vendorLoads.get(name);
-}
-function rasterCanvas(g, b, E, caption) {
-  const look = exportLook(E);
-  return sceneToCanvas(buildScene(g, gost, text, { fill: look.fill }), b, gost, text, { dpi: E.dpi || EXPORT.defaultDpi, background: look.background, caption });
-}
-async function makeFile(d, g, E) {
-  const b = geomBounds(g, measureMarkup, gost);
-  const look = exportLook(E);
-  const caption = E.caption ? captionOf(d) : null;
-  const base = safeName(captionOf(d));
-  if (E.fmt === 'svg') {
-    const svg = sceneToSvgFile(buildScene(g, gost, text, { fill: look.fill }), b, gost, text, { background: look.background, caption });
-    return { name: base + '.svg', blob: new Blob([svg], { type: 'image/svg+xml' }) };
-  }
-  const dpi = E.dpi || EXPORT.defaultDpi;
-  const cv = rasterCanvas(g, b, E, caption);
-  if (E.fmt === 'png') { const bl = await canvasBlob(cv, 'image/png'); return { name: base + '.png', blob: new Blob([pngWithDpi(await bl.arrayBuffer(), dpi)], { type: 'image/png' }) }; }
-  if (E.fmt === 'jpg') { const bl = await canvasBlob(cv, 'image/jpeg', EXPORT.jpegQuality); return { name: base + '.jpg', blob: new Blob([jpegWithDpi(await bl.arrayBuffer(), dpi)], { type: 'image/jpeg' }) }; }
-  if (E.fmt === 'webp') return { name: base + '.webp', blob: await canvasBlob(cv, 'image/webp', EXPORT.webpQuality) };
-  if (E.fmt === 'pdf') {
-    const { jsPDF } = await loadVendor('pdf');
-    const H = b.H + (caption ? M.caption.height : 0);
-    const doc = new jsPDF({ unit: 'mm', format: [b.W, H], orientation: b.W > H ? 'l' : 'p', compress: true });
-    doc.addImage(cv.toDataURL('image/png'), 'PNG', 0, 0, b.W, H, undefined, 'FAST');
-    return { name: base + '.pdf', blob: doc.output('blob') };
-  }
-  throw new Error('Неизвестный формат файла');
-}
 function saveBlob(name, blob) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
@@ -896,7 +796,7 @@ function saveBlob(name, blob) {
   toast('Файл сохранён: ' + name);
 }
 async function exportCurrent() {
-  try { const d = diagById(S.active); const f = await makeFile(d, G(), S.exp); saveBlob(f.name, f.blob); }
+  try { const f = await exporter.makeFile(G(), S.exp, captionOf(diagById(S.active))); saveBlob(f.name, f.blob); }
   catch (e) { toast(e.message || 'Не удалось сохранить файл'); }
 }
 async function exportAll() {
@@ -905,7 +805,7 @@ async function exportAll() {
     const zip = new JSZip();
     for (const d of visibleDiags()) {
       const g = S.manual[d.id] || geoms[d.id]; if (!g) continue; renumber(g, gost);
-      const f = await makeFile(d, g, S.exp); zip.file(f.name, f.blob);
+      const f = await exporter.makeFile(g, S.exp, captionOf(d)); zip.file(f.name, f.blob);
     }
     saveBlob(EXPORT.archiveName, await zip.generateAsync({ type: 'blob' }));
   } catch (e) { toast(e.message || 'Не удалось собрать архив'); }
@@ -914,7 +814,7 @@ async function copyPng() {
   try {
     const g = G(); const b = geomBounds(g, measureMarkup, gost);
     const E = { ...S.exp, fmt: 'png' };
-    const blob = await canvasBlob(rasterCanvas(g, b, E, S.exp.caption ? captionOf(diagById(S.active)) : null), 'image/png');
+    const blob = await canvasBlob(exporter.rasterCanvas(g, b, E, S.exp.caption ? captionOf(diagById(S.active)) : null), 'image/png');
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
     toast('Схема скопирована — вставьте её в документ');
   } catch { toast('Браузер не разрешил доступ к буферу обмена — скачайте PNG'); }
@@ -972,6 +872,7 @@ function renderSettings() {
   const c = $('#setCollapse'); c.checked = S.opts.collapseIO; c.onchange = () => applyOptions({ collapseIO: c.checked });
   const m = $('#setMaxH'); m.min = COLUMN_HEIGHT_RANGE.min; m.max = COLUMN_HEIGHT_RANGE.max; m.step = GRID; m.value = S.opts.maxH; m.onchange = () => applyOptions({ maxH: +m.value });
   const a = $('#setAuto'); a.checked = S.opts.autoBuild; a.onchange = () => { S.opts.autoBuild = a.checked; save(); };
+  const sp = $('#setSplit'); sp.checked = S.opts.splitLongBranches; sp.onchange = () => applyOptions({ splitLongBranches: sp.checked });
   for (const [key, values] of Object.entries(SYMBOL_OPTION_VALUES)) {
     const el = $('#set-' + key);
     el.innerHTML = values.map(v => `<option value="${v}">${esc(SYMBOL_OPTION_TEXT[key][v])}</option>`).join('');

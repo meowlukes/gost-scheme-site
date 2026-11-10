@@ -17,5 +17,5 @@ export default [
   },
   { files: ['src/ui/**'], languageOptions: { globals: globals.browser } },
   { files: ['src/render/canvas.js'], languageOptions: { globals: globals.browser } },
-  { files: ['scripts/**', 'tests/**', 'eslint.config.js'], languageOptions: { globals: globals.node } },
+  { files: ['scripts/**', 'tests/**', 'tests-ui/**', 'eslint.config.js'], languageOptions: { globals: { ...globals.node, document: 'readonly', localStorage: 'readonly' } } },
 ];

@@ -82,7 +82,7 @@ export function parsePascal(src) {
   const expS = v => { if (!acc(v)) throw perr(`ожидалось «${v}», найдено «${T().v}»`); };
   const expK = lc => { if (!accK(lc)) throw perr(`ожидалось «${lc}», найдено «${T().v}»`); };
 
-  const prog = { routines: [], mains: [], classes: {}, globals: new Map(), errors, src };
+  const prog = { routines: [], mains: [], classes: {}, types: {}, globals: new Map(), errors, src };
   const globalScope = { vars: prog.globals, routines: [], routine: null };
 
   function skipTo(v) { let d = 0; while (T().t !== 'eof') { if (isS('(') || isS('[')) d++; else if (isS(')') || isS(']')) d--; else if (d <= 0 && isS(v)) return; p++; } }
@@ -91,6 +91,7 @@ export function parsePascal(src) {
   // ----- типы (пропуск с учётом class/record ... end) -----
   function skipType() {
     let depth = 0, pd = 0, cls = null, prev = null; const start = p;
+    let rec = null; // поля записи верхнего уровня: нужны для оператора with
     for (;;) {
       const t = T();
       if (t.t === 'eof') break;
@@ -101,7 +102,7 @@ export function parsePascal(src) {
         p++; prev = t; continue;
       }
       if (t.t === 'kw') {
-        if (t.lc === 'record') { depth++; p++; prev = t; continue; }
+        if (t.lc === 'record') { depth++; if (depth === 1 && !rec) rec = []; p++; prev = t; continue; }
         if (t.lc === 'end') { depth = Math.max(0, depth - 1); p++; prev = t; continue; }
         if (t.lc === 'class' || t.lc === 'object' || t.lc === 'interface' || t.lc === 'dispinterface') {
           if (t.lc === 'object' && prev && prev.t === 'kw' && prev.lc === 'of') { p++; prev = t; continue; }
@@ -124,9 +125,12 @@ export function parsePascal(src) {
           p = q + 3; prev = toks[q + 2]; continue;
         }
       }
+      // имя поля записи: идентификатор в начале описания, за которым идёт «,» или «:»
+      if (rec && !cls && depth === 1 && pd === 0 && t.t === 'id' && (isS(',', P(1)) || isS(':', P(1))) &&
+          prev && ((prev.t === 'kw' && (prev.lc === 'record' || prev.lc === 'of')) || (prev.t === 'sym' && (prev.v === ';' || prev.v === ',')))) rec.push(t.v);
       p++; prev = t;
     }
-    return { text: toks.slice(start, p).map(x => x.v).join(' '), cls };
+    return { text: toks.slice(start, p).map(x => x.v).join(' '), cls, rec };
   }
   function parseTypes() {
     while (T().t === 'id') {
@@ -136,6 +140,7 @@ export function parsePascal(src) {
       accK('type');
       const r = skipType(); acc(';');
       if (r.cls) prog.classes[name.toLowerCase()] = { name, parent: r.cls.parent, fields: r.cls.fields };
+      else prog.types[name.toLowerCase()] = { name, text: r.text.toLowerCase(), fields: r.rec };
     }
   }
   function parseVars(map) {
@@ -144,7 +149,7 @@ export function parsePascal(src) {
       while (acc(',')) { if (T().t === 'id') names.push(next().v); }
       if (!acc(':')) { skipTo(';'); acc(';'); continue; }
       const r = skipType(); acc(';');
-      for (const nm of names) map.set(nm.toLowerCase(), { name: nm, type: r.text.toLowerCase() });
+      for (const nm of names) map.set(nm.toLowerCase(), { name: nm, type: r.text.toLowerCase(), fields: r.rec });
     }
   }
   function skipConsts(map) {
@@ -226,6 +231,7 @@ export function parsePascal(src) {
     const list = [];
     for (;;) {
       if (T().t === 'eof' || atStop(stops)) break;
+      if (acc(';')) continue; // пустой оператор допустим
       const before = p;
       const st = parseStmtSafe();
       if (st) list.push(st);
@@ -257,7 +263,7 @@ export function parsePascal(src) {
   }
   function parseStmt() {
     const t = T(), line = t.line;
-    if ((t.t === 'id' || t.t === 'num') && isS(':', P(1))) { p += 2; return stmtOrEmpty() || { s: 'empty' }; }
+    if ((t.t === 'id' || t.t === 'num') && isS(':', P(1))) { p += 2; return { s: 'label', name: t.v, body: stmtOrEmpty(), line }; }
     if (isK('begin')) { const b = parseCompound(); b.line = line; return b; }
     if (isK('if')) {
       p++; const cond = parseExpr(); expK('then');

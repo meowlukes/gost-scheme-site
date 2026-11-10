@@ -20,7 +20,7 @@ export function programs() {
 }
 
 /** Профиль «как было до перехода на символы ГОСТ» — для сравнения с эталоном. */
-export const LEGACY_OPTS = { ioSymbol: 'process', callSymbol: 'process', caseStyle: 'cascade' };
+export const LEGACY_OPTS = { ioSymbol: 'process', callSymbol: 'process', caseStyle: 'cascade', splitLongBranches: false };
 
 export function build(program, opts = {}, gost = GOST) {
   const env = { names: program.names, opts: { mergeN: 3, collapseIO: true, ...opts }, edits: {}, ifopts: {}, measure: measureFor(gost), gost };
