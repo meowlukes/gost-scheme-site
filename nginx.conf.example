@@ -1,30 +1,37 @@
 # Пример настройки nginx для сайта «Блок-схема из кода Pascal».
-# Скопируйте содержимое папки на сервер, например в /var/www/gost-scheme,
-# и подключите этот блок в /etc/nginx/sites-available/.
+# Скопируйте index.html, fonts/ и vendor/ на сервер, например в /var/www/gost-scheme,
+# и подключите этот блок в /etc/nginx/sites-available/ (или conf.d/).
 server {
-    listen 80;
-    server_name scheme.example.ru;          # ваш домен
+    listen 8080;                            # за HTTPS-прокси; для прямой раздачи — 80/443
+    server_name _;                          # ваш домен
 
-    root /var/www/gost-scheme;
+    root /usr/share/nginx/html;             # или /var/www/gost-scheme
     index index.html;
-
     charset utf-8;
 
+    # Заголовки безопасности. Скрипт и стили встроены в страницу, поэтому 'unsafe-inline';
+    # внешний адрес один — счётчик Яндекс.Метрики (уберите его из списка, если счётчик
+    # отключён в site.config.json).
+    set $csp "default-src 'self'; script-src 'self' 'unsafe-inline' https://mc.yandex.ru; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://mc.yandex.ru; font-src 'self'; connect-src 'self' https://mc.yandex.ru; frame-ancestors 'self'; base-uri 'self'; form-action 'none'";
+
+    # add_header из вложенного location отменяет заголовки уровня server,
+    # поэтому общий набор подключается в каждом location.
     location / {
         try_files $uri $uri/ /index.html;
+        # страница — без долгого кэша, чтобы обновления были видны сразу
+        add_header Cache-Control "no-cache" always;
+        add_header Content-Security-Policy $csp always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
     }
 
-    # Шрифты и библиотеки не меняются — кэшируем надолго
-    location ~* \.(woff2|js|css)$ {
-        expires 30d;
-        add_header Cache-Control "public";
-    }
-
-    # Сама страница — без долгого кэша, чтобы обновления были видны сразу
-    location = /index.html {
-        add_header Cache-Control "no-cache";
+    # Шрифты и библиотеки экспорта меняются редко
+    location ~* \.(woff2|js)$ {
+        add_header Cache-Control "public, max-age=2592000" always;
+        add_header X-Content-Type-Options "nosniff" always;
     }
 
     gzip on;
-    gzip_types text/html text/css application/javascript;
+    gzip_types text/css application/javascript text/javascript image/svg+xml;
 }

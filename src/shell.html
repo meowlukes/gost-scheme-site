@@ -5,13 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Блок-схема из кода Pascal по ГОСТ 19.701-90</title>
 <link rel="stylesheet" href="fonts/fonts.css">
-<script src="vendor/jspdf.umd.min.js" defer></script>
-<script src="vendor/jszip.min.js" defer></script>
 <style>
 :root {
   --desk: #D7DDD5; --panel: #F3F5F1; --paper: #FFFFFF; --ink: #1D2421; --graphite: #59625E; --rule: #C3CAC2; --rule-2: #DCE1DA;
   --pen: #2447B5; --on-pen: #FFFFFF; --pen-soft: #E3E9F8; --red: #BF3328; --red-soft: #F8E4E1; --ok: #2E7250; --grid: #E4A27A;
   --ui: "PT Sans", "Segoe UI", system-ui, sans-serif; --mono: "PT Mono", ui-monospace, Consolas, monospace;
+  --scheme-font: "Times New Roman", Tinos, "Liberation Serif", serif;
   color-scheme: light;
   box-sizing: border-box;
   padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -71,6 +70,11 @@ select.btn { padding-right: 8px; }
 details.settings { border-top: 1px solid var(--rule); padding-top: 8px; }
 details.settings summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .setrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; font-size: 14px; }
+.setrow.start { justify-content: flex-start; }
+.setrow select { max-width: 58%; height: 28px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); padding: 0 4px; font-size: 13px; }
+.hint.gap { margin-top: 12px; }
+.hint .bad { color: var(--red); }
+.check small { color: var(--graphite); white-space: nowrap; }
 .setrow input[type=number] { width: 70px; height: 28px; padding: 0 6px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); }
 
 /* ---- доска ---- */
@@ -93,8 +97,28 @@ details.settings summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .board { position: relative; flex: 1 1 auto; overflow: auto; min-height: 0; touch-action: pan-x pan-y pinch-zoom; }
 .board svg .bk, .board svg .lb, .board svg .cm, .board svg .hit, .board svg [data-part], .board[data-tool=line] svg, .board[data-tool=add] svg { touch-action: none; }
 .board svg { display: block; margin: 0 auto; }
-.board svg text { font-family: "Times New Roman", Tinos, "Liberation Serif", serif; }
-.board .dims text { font-family: var(--ui); }
+.board svg text { font-family: var(--scheme-font); }
+/* служебный слой листа: размеры в единицах схемы (мм) */
+.board .sheet { fill: #fff; stroke: #9aa39c; stroke-width: .15; }
+.board .grid-fine, .board .grid-unit, .board .grid-major { fill: none; stroke: var(--grid); }
+.board .grid-fine { stroke-width: .035; opacity: .55; }
+.board .grid-unit { stroke-width: .07; opacity: .8; }
+.board .grid-major { stroke: #DA8B5B; stroke-width: .12; opacity: .75; }
+.board .dims { color: #5A635E; }
+.board .dims.bad { color: #BF3328; }
+.board .dims text { font-family: var(--ui); font-size: 3.6px; fill: currentColor; }
+.board .dim-line { fill: none; stroke: currentColor; stroke-width: .18; }
+.board .dim-arrow { fill: currentColor; }
+.board .ov-select, .board .ov-overflow { fill: none; stroke-width: .4; stroke-dasharray: 1.4 .9; }
+.board .ov-select { stroke: #2447B5; }
+.board .ov-select.thin { stroke-width: .35; stroke-dasharray: 1 .7; }
+.board .ov-overflow { stroke: #BF3328; stroke-width: .35; stroke-dasharray: 1.2 .8; }
+.board .ov-line { fill: none; stroke: #2447B5; stroke-width: 1; opacity: .3; }
+.board .ov-seg { stroke: transparent; stroke-width: 2.4; }
+.board .ov-seg.v { cursor: ew-resize; } .board .ov-seg.h { cursor: ns-resize; }
+.board .ov-handle { fill: #fff; stroke: #2447B5; stroke-width: .35; cursor: move; }
+.board .ov-draft { fill: none; stroke: #2447B5; stroke-width: .45; stroke-dasharray: 1.2 .8; }
+.board .ov-draft-dot { fill: #2447B5; }
 .board .bk, .board .lb, .board .cm, .board .hit { cursor: move; }
 .board[data-tool=line] svg, .board[data-tool=line] .bk { cursor: crosshair; }
 .board[data-tool^=add] svg, .board[data-tool^=add] .bk { cursor: copy; }
@@ -115,7 +139,7 @@ details.settings summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .side-body h4 { margin: 18px 0 6px; font-size: 13px; color: var(--graphite); font-weight: 700; }
 .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 13px; color: var(--graphite); }
 .field textarea, .field input[type=text], .field select { color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); padding: 6px 8px; font-size: 14px; }
-.field textarea { min-height: 76px; resize: vertical; font-family: "Times New Roman", Tinos, serif; font-size: 16px; line-height: 1.35; }
+.field textarea { min-height: 76px; resize: vertical; font-family: var(--scheme-font); font-size: 16px; line-height: 1.35; }
 .actions { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .actions .btn { justify-content: flex-start; }
 .check { list-style: none; padding: 0; margin: 0; font-size: 14px; }
@@ -130,7 +154,7 @@ table.names th { text-align: left; font-weight: 700; color: var(--graphite); pad
 table.names td { padding: 3px 3px 3px 0; vertical-align: middle; }
 table.names td:first-child { font-family: var(--mono); font-size: 12px; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.names input { width: 100%; height: 28px; border: 1px solid var(--rule); border-radius: 4px; background: var(--paper); padding: 0 6px; font-size: 14px; }
-table.names input.disp { font-family: "Times New Roman", Tinos, serif; font-size: 15px; }
+table.names input.disp { font-family: var(--scheme-font); font-size: 15px; }
 .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; flex-wrap: wrap; }
 .seg button { border: 0; background: var(--paper); padding: 5px 10px; font-size: 13px; border-right: 1px solid var(--rule); }
 .seg button:last-child { border-right: 0; }
@@ -159,11 +183,12 @@ table.names input.disp { font-family: "Times New Roman", Tinos, serif; font-size
 </style>
 </head>
 <body>
+<!--__ANALYTICS__-->
 <div class="app">
   <header class="top">
     <div class="brand">
       <h1>Блок-схема из кода Pascal</h1>
-      <p>по ГОСТ 19.701-90 и правилам «Схемы программы (алгоритмов)»</p>
+      <p>схемы программы по ГОСТ 19.701-90 (ИСО 5807-85)</p>
     </div>
     <div class="top-actions">
       <label class="sr" for="exampleSel">Пример программы</label>
@@ -190,6 +215,9 @@ table.names input.disp { font-family: "Times New Roman", Tinos, serif; font-size
         <div class="setrow"><label for="setCollapse">Циклы ввода и вывода массивов — одним блоком</label><input type="checkbox" id="setCollapse"></div>
         <div class="setrow"><label for="setMaxH">Высота колонки до переноса, мм</label><input type="number" id="setMaxH" min="120" max="400" step="5"></div>
         <div class="setrow"><label for="setAuto">Перестраивать при изменении кода</label><input type="checkbox" id="setAuto"></div>
+        <div class="setrow"><label for="set-ioSymbol">Ввод и вывод</label><select id="set-ioSymbol"></select></div>
+        <div class="setrow"><label for="set-callSymbol">Вызов своей подпрограммы</label><select id="set-callSymbol"></select></div>
+        <div class="setrow"><label for="set-caseStyle">Оператор выбора case</label><select id="set-caseStyle"></select></div>
         <p class="hint">Всё, что вы меняете на схеме, сохраняется в этом браузере.</p>
       </details>
     </div>
@@ -199,31 +227,33 @@ table.names input.disp { font-family: "Times New Roman", Tinos, serif; font-size
     <nav class="tabs" id="tabs" role="tablist" aria-label="Схемы"></nav>
     <div class="toolbar" id="toolbar">
       <div class="tgroup" role="group" aria-label="Инструменты">
-        <button class="tbtn" data-tool="select" title="Выбор и перемещение (V)" aria-pressed="true"><svg viewBox="0 0 26 16"><path d="M9 2l8 7h-4l2 5-2 1-2-5-3 3z" fill="currentColor" stroke="none"/></svg></button>
-        <button class="tbtn" data-tool="add:term" title="Начало / Конец"><svg viewBox="0 0 26 16"><rect x="2" y="4.5" width="22" height="7" rx="3.5"/></svg></button>
-        <button class="tbtn" data-tool="add:rect" title="Процесс, ввод, вывод"><svg viewBox="0 0 26 16"><rect x="3" y="2.5" width="20" height="11"/></svg></button>
-        <button class="tbtn" data-tool="add:dia" title="Условие"><svg viewBox="0 0 26 16"><path d="M2 8L13 2.5 24 8 13 13.5z"/></svg></button>
-        <button class="tbtn" data-tool="add:lbeg" title="Начало цикла"><svg viewBox="0 0 26 16"><path d="M3 6l3-3.5h14l3 3.5v7.5H3z"/></svg></button>
-        <button class="tbtn" data-tool="add:lend" title="Конец цикла"><svg viewBox="0 0 26 16"><path d="M3 2.5h20V10l-3 3.5H6L3 10z"/></svg></button>
-        <button class="tbtn" data-tool="add:conn" title="Перенос (круг с буквой)"><svg viewBox="0 0 26 16"><circle cx="13" cy="8" r="5.5"/></svg></button>
-        <button class="tbtn" data-tool="add:label" title="Подпись «Да»/«Нет»"><svg viewBox="0 0 26 16"><text x="4" y="12" font-size="10" fill="currentColor" stroke="none" font-family="PT Sans">Да</text></svg></button>
-        <button class="tbtn" data-tool="line" title="Линия: щелчки по точкам, двойной щелчок — завершить (L)"><svg viewBox="0 0 26 16"><path d="M4 3v6h18v5"/></svg></button>
+        <button type="button" class="tbtn" data-tool="select" aria-label="Выбор и перемещение (V)" title="Выбор и перемещение (V)" aria-pressed="true"><svg viewBox="0 0 26 16"><path d="M9 2l8 7h-4l2 5-2 1-2-5-3 3z" fill="currentColor" stroke="none"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:term" aria-label="Терминатор (начало, конец)" title="Терминатор (начало, конец)"><svg viewBox="0 0 26 16"><rect x="2" y="4.5" width="22" height="7" rx="3.5"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:rect" aria-label="Процесс" title="Процесс"><svg viewBox="0 0 26 16"><rect x="3" y="2.5" width="20" height="11"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:data" aria-label="Данные (ввод, вывод)" title="Данные (ввод, вывод)"><svg viewBox="0 0 26 16"><path d="M6 2.5h17l-3 11H3z"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:predef" aria-label="Предопределённый процесс (вызов подпрограммы)" title="Предопределённый процесс (вызов подпрограммы)"><svg viewBox="0 0 26 16"><rect x="3" y="2.5" width="20" height="11"/><path d="M5.5 2.5v11M20.5 2.5v11"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:dia" aria-label="Решение (условие)" title="Решение (условие)"><svg viewBox="0 0 26 16"><path d="M2 8L13 2.5 24 8 13 13.5z"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:lbeg" aria-label="Граница цикла: начало" title="Граница цикла: начало"><svg viewBox="0 0 26 16"><path d="M3 6l3-3.5h14l3 3.5v7.5H3z"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:lend" aria-label="Граница цикла: конец" title="Граница цикла: конец"><svg viewBox="0 0 26 16"><path d="M3 2.5h20V10l-3 3.5H6L3 10z"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:conn" aria-label="Соединитель (перенос линии)" title="Соединитель (перенос линии)"><svg viewBox="0 0 26 16"><circle cx="13" cy="8" r="5.5"/></svg></button>
+        <button type="button" class="tbtn" data-tool="add:label" aria-label="Подпись выхода (значение условия)" title="Подпись выхода (значение условия)"><svg viewBox="0 0 26 16"><text x="4" y="12" font-size="10" fill="currentColor" stroke="none" font-family="PT Sans">Да</text></svg></button>
+        <button type="button" class="tbtn" data-tool="line" aria-label="Линия: щелчки по точкам, двойной щелчок — завершить (L)" title="Линия: щелчки по точкам, двойной щелчок — завершить (L)"><svg viewBox="0 0 26 16"><path d="M4 3v6h18v5"/></svg></button>
       </div>
       <div class="tsep"></div>
       <div class="tgroup">
-        <button class="tbtn" id="undoBtn" title="Отменить (Ctrl+Z)"><svg viewBox="0 0 26 16"><path d="M8 4L4 8l4 4M4 8h11a5 4 0 010 8h-2"/></svg></button>
-        <button class="tbtn" id="redoBtn" title="Повторить (Ctrl+Shift+Z)"><svg viewBox="0 0 26 16"><path d="M18 4l4 4-4 4M22 8H11a5 4 0 000 8h2"/></svg></button>
+        <button type="button" class="tbtn" id="undoBtn" aria-label="Отменить (Ctrl+Z)" title="Отменить (Ctrl+Z)"><svg viewBox="0 0 26 16"><path d="M8 4L4 8l4 4M4 8h11a5 4 0 010 8h-2"/></svg></button>
+        <button type="button" class="tbtn" id="redoBtn" aria-label="Повторить (Ctrl+Shift+Z)" title="Повторить (Ctrl+Shift+Z)"><svg viewBox="0 0 26 16"><path d="M18 4l4 4-4 4M22 8H11a5 4 0 000 8h2"/></svg></button>
       </div>
       <div class="tsep"></div>
       <div class="tgroup">
-        <button class="tbtn" id="zoomOut" title="Уменьшить">−</button>
+        <button type="button" class="tbtn" id="zoomOut" aria-label="Уменьшить" title="Уменьшить">−</button>
         <span class="zoomval" id="zoomVal">100%</span>
-        <button class="tbtn" id="zoomIn" title="Увеличить">+</button>
-        <button class="tbtn" id="zoomFit" title="Уместить по ширине">По ширине</button>
-        <button class="tbtn" id="zoom1" title="Натуральный размер (при 96 точках на дюйм)">1:1</button>
+        <button type="button" class="tbtn" id="zoomIn" aria-label="Увеличить" title="Увеличить">+</button>
+        <button type="button" class="tbtn" id="zoomFit" aria-label="Уместить по ширине" title="Уместить по ширине">По ширине</button>
+        <button type="button" class="tbtn" id="zoom1" aria-label="Натуральный размер (при 96 точках на дюйм)" title="Натуральный размер (при 96 точках на дюйм)">1:1</button>
       </div>
       <div class="tsep"></div>
-      <button class="tbtn" id="gridBtn" aria-pressed="true" title="Миллиметровая сетка">Сетка</button>
+      <button type="button" class="tbtn" id="gridBtn" aria-pressed="true" aria-label="Миллиметровая сетка" title="Миллиметровая сетка">Сетка</button>
     </div>
     <div class="board" id="boardWrap" data-tool="select">
       <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -242,7 +272,7 @@ table.names input.disp { font-family: "Times New Roman", Tinos, serif; font-size
   </aside>
 </div>
 <div id="toast" role="status"></div>
-<script>
+<script type="module">
 /*__APP__*/
 </script>
 </body>
