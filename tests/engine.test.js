@@ -103,7 +103,7 @@ test('PNG: блок pHYs с верной контрольной суммой', (
 
 test('настройки и сохранённое состояние проверяются', () => {
   const d = normalizeOptions(undefined, GOST);
-  assert.deepEqual(d, { mergeN: 3, collapseIO: true, maxH: GOST.metrics.page.height, autoBuild: true, ioSymbol: 'process', callSymbol: 'predefined', caseStyle: 'multi' });
+  assert.deepEqual(d, { mergeN: 3, collapseIO: true, maxH: GOST.metrics.page.height, autoBuild: true, ioSymbol: 'process', callSymbol: 'predefined', caseStyle: 'multi', splitLongBranches: true });
   assert.deepEqual(normalizeOptions({ mergeN: 99, maxH: 'x', caseStyle: 7, ioSymbol: 'data' }, GOST), { ...d, ioSymbol: 'data' });
   assert.equal(normalizeOptions({ maxH: 152 }, GOST).maxH, 150);
   const defaults = { ui: { grid: true, side: 'props' }, exp: { fmt: 'png', bg: 'white', fill: 'white', dpi: 300 } };

@@ -35,6 +35,8 @@ export function defaultOptions(gost) {
     ioSymbol: IO_SYMBOLS[0],
     callSymbol: CALL_SYMBOLS[0],
     caseStyle: CASE_STYLES[0],
+    /** Выносить через соединители ветви, которые не помещаются в колонку. */
+    splitLongBranches: true,
   };
 }
 
@@ -58,6 +60,7 @@ export function normalizeOptions(raw, gost) {
     ioSymbol: oneOf(o.ioSymbol, IO_SYMBOLS, d.ioSymbol),
     callSymbol: oneOf(o.callSymbol, CALL_SYMBOLS, d.callSymbol),
     caseStyle: oneOf(o.caseStyle, CASE_STYLES, d.caseStyle),
+    splitLongBranches: o.splitLongBranches === undefined ? d.splitLongBranches : !!o.splitLongBranches,
   };
 }
 

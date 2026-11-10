@@ -16,6 +16,10 @@ const RELSWAP = { '=': '=', '<>': '<>', '<': '>', '>': '<', '<=': '>=', '>=': '<
 const CONV = new Set(('strtofloat strtoint strtoint64 strtoqword strtodword strtofloatdef strtointdef strtoint64def floattostr inttostr ' +
   'floattostrf trim trimleft trimright currtostr strtocurr booltostr datetostr strtodate timetostr strtotime datetimetostr ' +
   'utf8decode utf8encode ansitoutf8 utf8toansi sys_utf8toansi strtobool strtobooldef inttohex').split(' '));
+/** Коды ниже пробела — управляющие символы (#13, #10 и т. п.). */
+const CONTROL_LIMIT = 32;
+/** Перевод числа в строку. */
+const TO_STRING = new Set(['inttostr', 'floattostr', 'floattostrf', 'currtostr', 'booltostr', 'inttohex']);
 const TYPECASTS = new Set(('integer longint int64 cardinal word byte shortint smallint longword qword real double single extended ' +
   'currency char boolean string ansistring widestring unicodestring shortstring pointer variant ansichar widechar').split(' '));
 const VALUE_PROPS = new Set(['text', 'caption', 'checked', 'itemindex', 'value', 'position', 'lines', 'cells', 'items', 'date', 'time', 'seltext', 'state', 'selected']);
@@ -23,8 +27,8 @@ const READS = new Set(['read', 'readln']);
 const WRITES = new Set(['write', 'writeln']);
 const MSGS = new Set(['showmessage', 'messagedlg', 'messagebox', 'showmessagefmt', 'questiondlg']);
 const IGNORE = new Set(('setfocus show showmodal hide close clear refresh repaint invalidate update beginupdate endupdate free freeandnil ' +
-  'destroy randomize sleep beep processmessages setlength assign assignfile reset rewrite append closefile flush selectall ' +
-  'clearselection setbounds bringtofront sendtoback terminate release fillchar dispose new getmem freemem initialize finalize ' +
+  'destroy randomize sleep beep processmessages assign assignfile reset rewrite append closefile flush selectall ' +
+  'clearselection setbounds bringtofront sendtoback terminate release fillchar initialize finalize ' +
   'delay clrscr gotoxy textcolor textbackground readkey cursoroff cursoron window setcurrentdir chdir inherited clearall ' +
   'sort autosize setfocused').split(' '));
 const OUTPUT_NAME = /^(show|display|print|output|out|setdata|setresult|setresults|setvalues|fill|вывод)/i;
@@ -239,7 +243,12 @@ function makePrinter(ctx) {
     const pd = pred(e); if (pd) return rp(pd.pos, PR.REL, 'pred');
     switch (e.e) {
       case 'num': return fmtNum(e.v);
-      case 'str': return rp('«' + escText(e.v.replace(/[\r\n]+/g, ' ')) + '»', PR.ATOM, 'str');
+      case 'str': {
+        // строка только из управляющих символов (#13#10) печатается так, как записана в программе
+        const isControl = ch => ch.charCodeAt(0) < CONTROL_LIMIT;
+        if (e.v && e.raw && [...e.v].every(isControl)) return rp(escText(e.raw), PR.ATOM, 'str');
+        return rp('«' + escText([...e.v].map(ch => (isControl(ch) ? ' ' : ch)).join('').replace(/ {2,}/g, ' ')) + '»', PR.ATOM, 'str');
+      }
       case 'nil': return rp('nil', PR.ATOM);
       case 'txt': return rp(e.s, PR.REL, 'pred');
       case 'case': {
@@ -249,7 +258,11 @@ function makePrinter(ctx) {
       }
       case 'range': return rp(pr(e.a).s + '..' + pr(e.b).s, PR.ATOM);
       case 'set': return rp('\\{' + e.items.map(i => pr(i).s).join(', ') + '\\}', PR.ATOM);
-      case 'id': return rp(disp(e.name), PR.ATOM, e.name.toLowerCase() === 'pi' ? 'const' : 'id');
+      case 'id': {
+        const lc = e.name.toLowerCase();
+        if (lc === 'random' && !ctx.isVar(lc) && !ctx.own.has(lc)) return rp(FUNCMAP.random, PR.ATOM, 'call');
+        return rp(disp(e.name), PR.ATOM, lc === 'pi' ? 'const' : 'id');
+      }
       case 'un': {
         if (e.op === 'not') return prNot(e.x);
         if (e.op === '-') return rp('–' + wrap(pr(e.x), PR.NEG), PR.NEG, 'neg');
@@ -301,6 +314,7 @@ function makePrinter(ctx) {
     }
     if (RELSYM[op]) { return rp(wrap(pr(e.l), PR.ADD) + ' ' + RELSYM[op] + ' ' + wrap(pr(e.r), PR.ADD), PR.REL); }
     if (op === 'is' || op === 'as') return rp(wrap(pr(e.l), PR.ADD) + ' ' + op + ' ' + wrap(pr(e.r), PR.ADD), PR.REL);
+    if (op === '+') { const cat = prNumberConcat(e); if (cat) return cat; }
     if (op === '+' || op === '-' || op === 'xor') {
       const l = pr(e.l), r = pr(e.r);
       const rs = r.kind === 'neg' ? '(' + r.s + ')' : wrap(r, op === '+' ? PR.ADD : PR.MUL);
@@ -309,7 +323,8 @@ function makePrinter(ctx) {
     if (op === '*') {
       if (e.l.e === 'id' && e.r.e === 'id' && e.l.name.toLowerCase() === e.r.name.toLowerCase()) return rp(disp(e.l.name) + '^2', PR.ATOM, 'pow');
       const l = pr(e.l), r = pr(e.r);
-      const ls = wrap(l, PR.MUL), rs = r.kind === 'neg' ? '(' + r.s + ')' : wrap(r, PR.MUL);
+      // (a/b)·c: без скобок запись «a/b·c» читается как a/(b·c)
+      const ls = l.kind === 'div' ? '(' + l.s + ')' : wrap(l, PR.MUL), rs = r.kind === 'neg' ? '(' + r.s + ')' : wrap(r, PR.MUL);
       const lPar = l.p < PR.MUL, rPar = r.p < PR.MUL || r.kind === 'neg';
       const lastCh = ls.replace(/\\(.)/g, '$1').slice(-1);
       const oneLetter = r.kind === 'id' && plainLen(rs) === 1 && /[A-Za-zА-Яа-яα-ωΑ-Ω]/.test(rs) && rs !== lastCh;
@@ -318,12 +333,24 @@ function makePrinter(ctx) {
     }
     if (op === '/') {
       const l = pr(e.l), r = pr(e.r);
-      return rp(wrap(l, PR.MUL) + '/' + (r.kind === 'neg' ? '(' + r.s + ')' : wrap(r, PR.NEG)), PR.MUL);
+      return rp(wrap(l, PR.MUL) + '/' + (r.kind === 'neg' ? '(' + r.s + ')' : wrap(r, PR.NEG)), PR.MUL, 'div');
     }
     if (op === 'div' || op === 'mod' || op === 'shl' || op === 'shr') {
       return rp(wrap(pr(e.l), PR.MUL) + ' ' + op + ' ' + wrap(pr(e.r), PR.NEG), PR.MUL);
     }
     return rp(wrap(pr(e.l), PR.ADD) + ' ' + op + ' ' + wrap(pr(e.r), PR.ADD), PR.REL);
+  }
+  /**
+   * Сцепление чисел, переведённых в строки: IntToStr(a) + FloatToStr(x). Обычно перевод в строку
+   * на схеме опускается, но здесь «a + x» читалось бы как сумма — поэтому пишем «строка(a)».
+   * Если в сцеплении есть строка в кавычках, смысл и так ясен, и запись остаётся короткой.
+   */
+  function prNumberConcat(e) {
+    const terms = [];
+    (function flat(n) { if (n.e === 'bin' && n.op === '+') { flat(n.l); flat(n.r); } else terms.push(n); })(e);
+    const toStr = n => n.e === 'call' && n.f.e === 'id' && TO_STRING.has(n.f.name.toLowerCase()) && n.args.length > 0;
+    if (!terms.some(toStr) || terms.some(n => n.e === 'str')) return null;
+    return rp(terms.map(n => (toStr(n) ? TEXTS.asString + '(' + pr(n.args[0]).s + ')' : wrap(pr(n), PR.ADD))).join(' + '), PR.ADD);
   }
   function args(list) { return list.map(a => pr(a).s).join(', '); }
   function prCall(e) {
@@ -412,7 +439,7 @@ function buildContext(prog, R, env) {
   for (const r of prog.routines) addCanon(r.short);
   for (const c of comps.values()) addCanon(c.name);
   const classNames = new Set(Object.keys(prog.classes));
-  const ctx = { prog, R, env, fn: R && R.isFunc ? R : null, own, comps, canon, vars, classNames, used: new Map(), loops: [], opts: env.opts || {} };
+  const ctx = { prog, R, env, fn: R && R.isFunc ? R : null, own, comps, canon, vars, classNames, used: new Map(), loops: [], opts: env.opts || {}, notes: [] };
   ctx.isVar = name => vars.has(name.toLowerCase());
   ctx.P = makePrinter(ctx);
   return ctx;
@@ -448,6 +475,8 @@ export function transformRoutine(prog, R, body, env) {
   const ioBlk = (kind, vars, key) => { vars = vars.map(valueOf); return mkBlk(kind, key, [ioCaption(kind) + vars.map(v => P.pr(v).s).join(', ')], { vars }); };
   const errBlk = key => mkBlk('err', key, [...TEXTS.errorOutput]);
   const proc = (key, text) => mkBlk('proc', key, [text]);
+  /** Замечание для пользователя: оператор программы не показан на схеме или показан упрощённо. */
+  const note = (line, msg) => { if (line) ctx.notes.push({ line, msg }); };
   const quoteShort = s => { s = s.replace(/\s+/g, ' ').trim(); return s.length <= QUOTE_LIMIT ? TEXTS.output + ' «' + escText(s) + '»' : TEXTS.messageOutput; };
 
   function isFileVar(e) {
@@ -497,7 +526,7 @@ export function transformRoutine(prog, R, body, env) {
     if (!c.obj && READS.has(lc)) { let a = c.args; if (a.length && isFileVar(a[0])) a = a.slice(1); return a.length ? [ioBlk('in', a, key)] : []; }
     if (!c.obj && WRITES.has(lc)) { let a = c.args; if (a.length && isFileVar(a[0])) a = a.slice(1); return a.length ? outFromExprs(a, key, false) : []; }
     if (MSGS.has(lc)) { const a = c.args.slice(0, 1); return a.length ? outFromExprs(a, key, true) : []; }
-    if (c.chain[0] === 'application') return [];
+    if (c.chain[0] === 'application') { note(st.line, `вызов ${ch} не показан на схеме (служебное действие)`); return []; }
     if (!c.obj && (lc === 'inc' || lc === 'dec')) {
       const a = c.args[0]; if (!a) return [];
       const n = c.args[1] || { e: 'num', v: '1' };
@@ -505,7 +534,7 @@ export function transformRoutine(prog, R, body, env) {
     }
     if (!c.obj && lc === 'exit') {
       const res = [];
-      if (c.args.length && ctx.fn) res.push(proc(key, P.dispRoutine(ctx.fn) + ' = ' + P.pr(c.args[0]).s));
+      if (c.args.length && ctx.fn) res.push(proc(key, P.dispRoutine(ctx.fn) + ' = ' + wrap(P.pr(c.args[0]), PR.ADD)));
       res.push({ t: 'jump', target: 'end' }); return res;
     }
     if (!c.obj && lc === 'halt') return [{ t: 'jump', target: 'end' }];
@@ -514,7 +543,7 @@ export function transformRoutine(prog, R, body, env) {
       L.used[lc] = true; return [{ t: 'jump', target: (lc === 'break' ? 'brk:' : 'cont:') + L.key }];
     }
     if (/(^|\.)(lines|items)\.(add|append|addstrings|insert)$/.test(ch)) { const a = lc === 'insert' ? c.args.slice(1) : c.args; return outFromExprs(a, key, false); }
-    if (IGNORE.has(lc)) return [];
+    if (IGNORE.has(lc)) { note(st.line, `вызов ${c.name} не показан на схеме (служебное действие)`); return []; }
     if (!c.obj && lc === 'str' && c.args.length >= 2) return [proc(key, P.pr(c.args[1]).s + ' = ' + P.pr(c.args[0]).s)];
     if (!c.obj && lc === 'val' && c.args.length >= 2) {
       if (isInput(c.args[0])) return [ioBlk('in', [c.args[1]], key)];
@@ -527,10 +556,16 @@ export function transformRoutine(prog, R, body, env) {
 
   function trList(stmts, path) {
     const out = [];
+    let unreachable = false;
     for (let i = 0; i < stmts.length; i++) {
       const st = stmts[i];
-      if (st && st.s === 'call' && isPromptThenRead(st, stmts[i + 1])) continue;
-      out.push(...trStmt(st, path + '.' + i));
+      if (!st) continue;
+      // после goto выполнение продолжается только с метки
+      if (unreachable) { if (st.s !== 'label') { note(st.line, 'оператор недостижим после goto и не показан на схеме'); continue; } unreachable = false; }
+      if (st.s === 'call' && isPromptThenRead(st, stmts[i + 1])) continue;
+      const items = trStmt(st, path + '.' + i);
+      out.push(...items);
+      if (items.length && items[items.length - 1].t === 'goto') unreachable = true;
     }
     return mergeBlocks(out);
   }
@@ -590,7 +625,17 @@ export function transformRoutine(prog, R, body, env) {
         if (opts.collapseIO !== false) { const cIO = collapseIO(node); if (cIO) return [cIO]; }
         return [node];
       }
-      case 'with': return trList(asList(st.body), key);
+      case 'with': {
+        // поля записи внутри with получают её имя: «x := 1» → «r.x = 1»
+        let body = st.body; const unknown = [];
+        for (let i = st.objs.length - 1; i >= 0; i--) {
+          const fields = fieldsOf(st.objs[i]);
+          if (fields && fields.length) body = qualify(body, st.objs[i], new Set(fields.map(f => f.toLowerCase())));
+          else unknown.push(P.pr(st.objs[i]).s);
+        }
+        if (unknown.length) note(st.line, `with ${unknown.join(', ')}: состав полей неизвестен — имена внутри показаны без уточнения`);
+        return trList(asList(body), key);
+      }
       case 'try': {
         const body = trList(st.body, key + '.t');
         let res = body;
@@ -603,13 +648,16 @@ export function transformRoutine(prog, R, body, env) {
             const s = names.join(', ') + (names.length > 1 ? ' – числа' : ' – число');
             const ns = names.length > 1 ? 'не все из ' + names.join(', ') + ' – числа' : names[0] + ' – не число';
             res = body.slice(0, k).concat([{ t: 'if', key: key + '.c', cond: { e: 'txt', s, neg: ns }, yes: body.slice(k), no: exc, inv: false, mode: 'down' }]);
-          }
+          } else note(st.line, 'обработчик исключения (except) не показан на схеме: неизвестно, какой оператор вызывает ошибку');
         }
         if (st.fin) res = res.concat(trList(st.fin, key + '.f'));
         return res;
       }
       case 'raise': return [errBlk(key), { t: 'jump', target: 'end' }];
-      case 'goto': return [proc(key, TEXTS.jumpTo + ' ' + escId(st.label))];
+      // goto и метка изображаются парой соединителей (п. 3.4.1 ГОСТ)
+      case 'goto': return [{ t: 'goto', key, label: String(st.label).toLowerCase(), name: String(st.label), line: st.line }];
+      case 'label': return [{ t: 'label', key: key + ':l', label: String(st.name).toLowerCase(), name: String(st.name), line: st.line }, ...trStmt(st.body, key)];
+      case 'asm': note(st.line, 'вставка на ассемблере не показана на схеме'); return [];
       case 'error': return [mkBlk('proc', key, ['⚠ ' + escText(st.text.slice(0, 40))], { warn: true })];
       default: return [];
     }
@@ -670,19 +718,76 @@ export function transformRoutine(prog, R, body, env) {
     return found;
   }
 
+  // --- with: какие поля есть у записи ---
+  function typeFields(text, depth = 0) {
+    if (!text || depth > 8) return null;
+    const m = /(?:\bof\s+)?\^?\s*([\wа-яё.]+)\s*$/i.exec(text.trim());
+    const name = m && m[1];
+    if (!name) return null;
+    const ty = prog.types[name];
+    if (ty) return ty.fields || typeFields(ty.text, depth + 1);
+    const cls = prog.classes[name];
+    return cls ? cls.fields.map(f => f.name) : null;
+  }
+  function fieldsOf(e) {
+    let base = e; while (base.e === 'idx') base = base.x;
+    if (base.e !== 'id') return null;
+    const v = ctx.vars.get(base.name.toLowerCase());
+    return v ? (v.fields || typeFields(v.type)) : null;
+  }
+  function qualify(node, obj, fields) {
+    if (Array.isArray(node)) return node.map(n => qualify(n, obj, fields));
+    if (!node || typeof node !== 'object') return node;
+    if (node.e === 'id') return fields.has(node.name.toLowerCase()) ? { e: 'dot', x: obj, name: node.name } : node;
+    if (node.e === 'call' && node.f.e === 'id') return { ...node, args: qualify(node.args, obj, fields) };
+    const out = {};
+    for (const k of Object.keys(node)) out[k] = qualify(node[k], obj, fields);
+    return out;
+  }
+
   const stmts = body ? asList(body) : [];
   const reads = collectReads(stmts);
   let ir = trList(stmts, 'b');
+  resolveLabels(ir, note);
   if (reads.length) ir = mergeBlocks([ioBlk('in', reads, 'in0')].concat(ir));
   normalize(ir, true, true, P);
-  return { ir, used: ctx.used, ctx };
+  ctx.notes.sort((a, b) => a.line - b.line);
+  return { ir, used: ctx.used, ctx, notes: ctx.notes };
+}
+
+/** Обход вложенных последовательностей логической модели. */
+function eachBody(it, visit) {
+  if (it.t === 'if') { visit(it.yes); visit(it.no); }
+  else if (it.t === 'casc') { it.arms.forEach(a => visit(a.body)); if (it.els) visit(it.els); }
+  else if (it.t === 'while' || it.t === 'repeat' || it.t === 'for') visit(it.body);
+}
+/**
+ * Согласует goto и метки: метка, на которую нет перехода, убирается (иначе на схеме остался бы
+ * соединитель без пары); goto на неописанную метку показывается обычным блоком с замечанием.
+ */
+function resolveLabels(ir, note) {
+  const defined = new Set(), targeted = new Set();
+  (function scan(seq) { for (const it of seq) { if (it.t === 'label') defined.add(it.label); else if (it.t === 'goto') targeted.add(it.label); eachBody(it, scan); } })(ir);
+  if (!defined.size && !targeted.size) return;
+  (function fix(seq) {
+    for (let i = 0; i < seq.length; i++) {
+      const it = seq[i];
+      if (it.t === 'label' && !targeted.has(it.label)) { seq.splice(i, 1); i--; continue; }
+      if (it.t === 'goto' && !defined.has(it.label)) {
+        note(it.line, `goto ${it.name}: метка не найдена в этой подпрограмме`);
+        seq[i] = { t: 'blk', kind: 'proc', key: it.key, lines: [TEXTS.jumpTo + ' ' + escId(it.name)] };
+        continue;
+      }
+      eachBody(it, fix);
+    }
+  })(ir);
 }
 
 // ---------- нормализация: ветви ошибок, досрочные выходы, выбор направления «Да» ----------
 function isDead(seq) {
   if (!seq || !seq.length) return false;
   const l = seq[seq.length - 1];
-  if (l.t === 'jump') return true;
+  if (l.t === 'jump' || l.t === 'goto') return true;
   if (l.t === 'if') return l.yes.length > 0 && l.no.length > 0 && isDead(l.yes) && isDead(l.no);
   if (l.t === 'casc') return !!l.els && isDead(l.els) && l.arms.every(a => isDead(a.body));
   return false;
@@ -712,7 +817,11 @@ function normalize(seq, tail, top, P) {
   // отбросить недостижимое
   for (let i = 0; i < seq.length; i++) {
     const it = seq[i];
-    if (it.t === 'jump' || (it.t === 'if' && isDead([it])) || (it.t === 'casc' && isDead([it]))) { seq.splice(i + 1); break; }
+    if (it.t === 'jump' || it.t === 'goto' || (it.t === 'if' && isDead([it])) || (it.t === 'casc' && isDead([it]))) {
+      // до следующей метки: на неё можно попасть по goto
+      let j = i + 1; while (j < seq.length && seq[j].t !== 'label') j++;
+      seq.splice(i + 1, j - i - 1);
+    }
   }
   // направление ветвей
   for (const it of seq) {

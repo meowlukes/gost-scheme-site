@@ -37,7 +37,7 @@ export function buildProject(code, env) {
   for (const d of out) {
     try {
       const t = transformRoutine(prog, d.R, d.body, env);
-      d.ir = t.ir; d.used = t.used; d.ctx = t.ctx;
+      d.ir = t.ir; d.used = t.used; d.ctx = t.ctx; d.notes = t.notes;
     } catch (e) {
       d.ir = []; d.used = new Map(); d.failed = String((e && e.message) || e);
       prog.errors.push({ line: d.line, msg: 'не удалось разобрать подпрограмму: ' + d.failed });
@@ -46,7 +46,10 @@ export function buildProject(code, env) {
   }
   const counts = { main: out.filter((d) => d.kind === 'program').length, handler: out.filter((d) => d.kind === 'handler' && !d.empty).length };
   for (const d of out) d.title = routineTitle(d, env, counts);
-  return { prog, diagrams: out, errors: prog.errors };
+  // замечания: что из программы не попало на схему или показано упрощённо
+  const seenNotes = new Set();
+  const notes = out.flatMap((d) => d.notes || []).filter((n) => { const k = n.line + '|' + n.msg; if (seenNotes.has(k)) return false; seenNotes.add(k); return true; }).sort((a, b) => a.line - b.line);
+  return { prog, diagrams: out, errors: prog.errors, notes };
 }
 
 /** Имена из программы для таблицы «Обозначения». */
