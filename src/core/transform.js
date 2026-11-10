@@ -1,4 +1,14 @@
-// ===================== ПЕЧАТЬ ВЫРАЖЕНИЙ И ПРЕОБРАЗОВАНИЕ В ЛОГИЧЕСКУЮ МОДЕЛЬ =====================
+/**
+ * Печать выражений Pascal в математической записи и перевод операторов в логическую
+ * модель схемы (IR): блоки, ветвления, циклы, переходы.
+ *
+ * Виды блоков (поле kind): in — ввод, out — вывод, err — вывод сообщения об ошибке,
+ * proc — вычисление, call — вызов подпрограммы, описанной в этой же программе.
+ * Какой символ ГОСТ соответствует виду блока, решает раскладка (core/layout.js).
+ */
+import { TEXTS } from '../gost/texts.js';
+import { MERGE_RANGE } from './options.js';
+
 const PR = { OR: 1, AND: 2, NOT: 3, REL: 4, ADD: 5, MUL: 6, NEG: 7, FN: 8, ATOM: 9 };
 const RELSYM = { '=': '=', '<>': '≠', '<': '<', '>': '>', '<=': '≤', '>=': '≥' };
 const RELFLIP = { '=': '<>', '<>': '=', '<': '>=', '>=': '<', '>': '<=', '<=': '>' };
@@ -9,7 +19,6 @@ const CONV = new Set(('strtofloat strtoint strtoint64 strtoqword strtodword strt
 const TYPECASTS = new Set(('integer longint int64 cardinal word byte shortint smallint longword qword real double single extended ' +
   'currency char boolean string ansistring widestring unicodestring shortstring pointer variant ansichar widechar').split(' '));
 const VALUE_PROPS = new Set(['text', 'caption', 'checked', 'itemindex', 'value', 'position', 'lines', 'cells', 'items', 'date', 'time', 'seltext', 'state', 'selected']);
-const COMP_TYPES = /^t(edit|label|button|memo|combobox|radiobutton|checkbox|stringgrid|drawgrid|listbox|spinedit|floatspinedit|trackbar|radiogroup|checkgroup|panel|image|shape|labelededit|maskedit|statictext|datetimepicker|calendar|scrollbar|updown|groupbox|richedit|synedit|progressbar|valuelisteditor|togglebox|bitbtn|speedbutton|colorbox|listview|treeview|chart|checklistbox|editbutton|spinedit\w*|\w*edit|\w*grid|\w*box)$/i;
 const READS = new Set(['read', 'readln']);
 const WRITES = new Set(['write', 'writeln']);
 const MSGS = new Set(['showmessage', 'messagedlg', 'messagebox', 'showmessagefmt', 'questiondlg']);
@@ -103,7 +112,7 @@ function makePrinter(ctx) {
     let x = lhs; if (x.e === 'idx') x = x.x;
     if (x.e !== 'dot') return null;
     const prop = x.name.toLowerCase();
-    let obj = x.x;
+    const obj = x.x;
     if (/^(caption|text|cells|lines|items|value|checked|hint)$/.test(prop) && (isComp(obj) || (obj.e === 'id' && !ctx.isVar(obj.name)))) return { name: compName(obj), prop };
     if (obj.e === 'dot' && /^(lines|items)$/.test(obj.name.toLowerCase()) && isComp(obj.x)) return { name: compName(obj.x), prop };
     return null;
@@ -128,7 +137,7 @@ function makePrinter(ctx) {
     if (e.e === 'call' && e.f.e === 'id') {
       const lc = e.f.name.toLowerCase();
       if (lc === 'format' && e.args.length > 1) { leaves(e.args[0], out); const s = e.args[1]; if (s.e === 'set') s.items.forEach(i => leaves(i, out)); else leaves(s, out); return out; }
-      if (lc === 'booltostr' || lc === 'ifthen') { if (lc === 'ifthen') { out.push(e.args[0]); return out; } out.push(e.args[0]); return out; }
+      if (lc === 'booltostr' || lc === 'ifthen') { out.push(e.args[0]); return out; }
       if (lc === 'concat') { e.args.forEach(a => leaves(a, out)); return out; }
     }
     out.push(e); return out;
@@ -176,7 +185,6 @@ function makePrinter(ctx) {
         const a = pr(e.args[1]).s, b = pr(e.args[0]).s; return { pos: a + ' входит в ' + b, neg: a + ' не входит в ' + b };
       }
     }
-    if (e.e === 'id' && ctx.comps.has(e.name.toLowerCase()) === false) { /* bool var: no phrase */ }
     const cr = e.e === 'dot' ? compRead(e) : null;
     if (cr && cr.prop === 'checked') { const d = disp(cr.name, 'comp'); return { pos: d + ' отмечен', neg: d + ' не отмечен' }; }
     if (e.e === 'bin' && e.op === 'in') {
@@ -357,7 +365,7 @@ function makePrinter(ctx) {
 }
 
 // ---------- отрицание условия ----------
-function negate(e) {
+export function negate(e) {
   if (!e) return e;
   if (e.e === 'un' && e.op === 'not') return e.x;
   if (e.e === 'bin' && RELFLIP[e.op]) return { e: 'bin', op: RELFLIP[e.op], l: e.l, r: e.r };
@@ -409,7 +417,7 @@ function buildContext(prog, R, env) {
   ctx.P = makePrinter(ctx);
   return ctx;
 }
-function isFormClass(prog, name) {
+export function isFormClass(prog, name) {
   let c = prog.classes[String(name).toLowerCase()], guard = 0;
   while (c && guard++ < 10) {
     if (!c.parent) return false;
@@ -420,20 +428,27 @@ function isFormClass(prog, name) {
   return false;
 }
 
+/** Подпись блока ввода/вывода. */
+const ioCaption = kind => (kind === 'in' ? TEXTS.input : TEXTS.output) + ' ';
+/** Самая длинная строка-литерал, которую ещё показываем в блоке вывода целиком. */
+const QUOTE_LIMIT = 22;
+/** Предельная длина строки при объединении соседних действий в один блок: для двух и для трёх строк. */
+const MERGE_LINE_LIMIT = { two: 26, three: 30 };
+
 const asList = st => !st ? [] : st.s === 'block' ? st.list : [st];
 function mkBlk(kind, key, lines, extra) { return Object.assign({ t: 'blk', kind, key, lines }, extra || {}); }
 
-function transformRoutine(prog, R, body, env) {
+export function transformRoutine(prog, R, body, env) {
   const ctx = buildContext(prog, R, env);
   const P = ctx.P;
   const opts = ctx.opts;
-  const mergeN = Math.max(1, Math.min(3, opts.mergeN || 3));
+  const mergeN = Math.max(MERGE_RANGE.min, Math.min(MERGE_RANGE.max, opts.mergeN || MERGE_RANGE.max));
 
   const valueOf = v => { if (v.e === 'dot' || v.e === 'idx') { const cr = P.compRead(v); if (cr && !cr.sub) return { e: 'id', name: cr.name }; } return v; };
-  const ioBlk = (kind, vars, key) => { vars = vars.map(valueOf); return mkBlk(kind, key, [(kind === 'in' ? 'Ввод ' : 'Вывод ') + vars.map(v => P.pr(v).s).join(', ')], { vars }); };
-  const errBlk = key => mkBlk('err', key, ['Вывод сообщения', 'об ошибке']);
+  const ioBlk = (kind, vars, key) => { vars = vars.map(valueOf); return mkBlk(kind, key, [ioCaption(kind) + vars.map(v => P.pr(v).s).join(', ')], { vars }); };
+  const errBlk = key => mkBlk('err', key, [...TEXTS.errorOutput]);
   const proc = (key, text) => mkBlk('proc', key, [text]);
-  const quoteShort = s => { s = s.replace(/\s+/g, ' ').trim(); return s.length <= 22 ? 'Вывод «' + escText(s) + '»' : 'Вывод сообщения'; };
+  const quoteShort = s => { s = s.replace(/\s+/g, ' ').trim(); return s.length <= QUOTE_LIMIT ? TEXTS.output + ' «' + escText(s) + '»' : TEXTS.messageOutput; };
 
   function isFileVar(e) {
     if (e.e !== 'id') return false; const v = ctx.vars.get(e.name.toLowerCase());
@@ -474,6 +489,11 @@ function transformRoutine(prog, R, body, env) {
   function trCall(st, key) {
     const c = callInfo(st.e); const lc = c.lc; const ch = c.chain.join('.');
     if (!lc) return [proc(key, P.pr(st.e).s)];
+    // Подпрограмма, описанная в этой программе, перекрывает одноимённую стандартную (Show, Clear,
+    // Update…), поэтому проверяется первой — иначе её вызов молча пропал бы со схемы.
+    // Вызов своей подпрограммы — отдельный блок (символ «Предопределённый процесс», п. 3.2.2.1);
+    // если выбран символ «Процесс», вызов остаётся обычным действием и может объединяться с соседними
+    if (!c.obj && ctx.own.has(lc)) return [mkBlk(opts.callSymbol === 'process' ? 'proc' : 'call', key, [P.pr(st.e).s])];
     if (!c.obj && READS.has(lc)) { let a = c.args; if (a.length && isFileVar(a[0])) a = a.slice(1); return a.length ? [ioBlk('in', a, key)] : []; }
     if (!c.obj && WRITES.has(lc)) { let a = c.args; if (a.length && isFileVar(a[0])) a = a.slice(1); return a.length ? outFromExprs(a, key, false) : []; }
     if (MSGS.has(lc)) { const a = c.args.slice(0, 1); return a.length ? outFromExprs(a, key, true) : []; }
@@ -500,7 +520,6 @@ function transformRoutine(prog, R, body, env) {
       if (isInput(c.args[0])) return [ioBlk('in', [c.args[1]], key)];
       return [proc(key, P.pr(c.args[1]).s + ' = ' + P.pr(c.args[0]).s)];
     }
-    if (!c.obj && ctx.own.has(lc)) return [proc(key, P.pr(st.e).s)];
     if (c.obj && (/^(self|form\d*|t?form\w*)$/i.test(c.chain[0] || '') || OUTPUT_NAME.test(lc)) && c.args.length) return outFromExprs(c.args, key, false);
     if (OUTPUT_NAME.test(lc) && c.args.length) return outFromExprs(c.args, key, false);
     return [proc(key, P.pr(st.e).s)];
@@ -527,10 +546,10 @@ function transformRoutine(prog, R, body, env) {
       if (prev && prev.t === 'blk' && it.t === 'blk' && !prev.noMerge && !it.noMerge) {
         if ((prev.kind === 'in' || prev.kind === 'out') && prev.kind === it.kind && prev.vars && it.vars && prev.vars.length && it.vars.length) {
           const seen = new Set(prev.vars.map(v => P.pr(v).s)); const add = it.vars.filter(v => !seen.has(P.pr(v).s));
-          prev.vars = prev.vars.concat(add); prev.lines = [(prev.kind === 'in' ? 'Ввод ' : 'Вывод ') + prev.vars.map(v => P.pr(v).s).join(', ')]; continue;
+          prev.vars = prev.vars.concat(add); prev.lines = [ioCaption(prev.kind) + prev.vars.map(v => P.pr(v).s).join(', ')]; continue;
         }
         const total = prev.lines.length + it.lines.length;
-        const lim = total >= 3 ? 30 : 26;
+        const lim = total >= 3 ? MERGE_LINE_LIMIT.three : MERGE_LINE_LIMIT.two;
         if (prev.kind === 'proc' && it.kind === 'proc' && total <= mergeN && !prev.warn && !it.warn &&
             prev.lines.every(l => plainLen(l) <= lim) && it.lines.every(l => plainLen(l) <= lim)) { prev.lines = prev.lines.concat(it.lines); continue; }
       }
@@ -557,7 +576,7 @@ function transformRoutine(prog, R, body, env) {
       case 'case': {
         const arms = st.arms.map((a, i) => ({ cond: { e: 'case', sel: st.sel, labels: a.labels }, key: key + '.a' + i, body: trList(asList(a.body), key + '.a' + i) }));
         if (!arms.length) return [];
-        return [{ t: 'casc', key, arms, els: st.els ? trList(st.els, key + '.e') : null }];
+        return [{ t: 'casc', key, sel: st.sel, arms, els: st.els ? trList(st.els, key + '.e') : null }];
       }
       case 'while': case 'repeat': case 'for': case 'forin': {
         const L = { key, used: {} }; ctx.loops.push(L);
@@ -590,7 +609,7 @@ function transformRoutine(prog, R, body, env) {
         return res;
       }
       case 'raise': return [errBlk(key), { t: 'jump', target: 'end' }];
-      case 'goto': return [proc(key, 'Переход к ' + escId(st.label))];
+      case 'goto': return [proc(key, TEXTS.jumpTo + ' ' + escId(st.label))];
       case 'error': return [mkBlk('proc', key, ['⚠ ' + escText(st.text.slice(0, 40))], { warn: true })];
       default: return [];
     }

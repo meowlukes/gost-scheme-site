@@ -1,0 +1,20 @@
+{
+  "analytics": {
+    "yandexMetrika": {
+      "enabled": true,
+      "id": 113096039,
+      "options": {
+        "ssr": true,
+        "webvisor": true,
+        "clickmap": true,
+        "ecommerce": "dataLayer",
+        "accurateTrackBounce": true,
+        "trackLinks": true
+      }
+    }
+  },
+  "vendor": {
+    "vendor/jspdf.umd.min.js": "node_modules/jspdf/dist/jspdf.umd.min.js",
+    "vendor/jszip.min.js": "node_modules/jszip/dist/jszip.min.js"
+  }
+}

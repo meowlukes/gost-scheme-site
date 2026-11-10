@@ -1,37 +1,76 @@
-// ===================== ПРИЛОЖЕНИЕ =====================
-(function () {
-'use strict';
-const LS_KEY = 'gost-pascal-scheme-v1';
+/**
+ * Интерфейс: редактор кода, лист со схемой, правка мышью, обозначения, экспорт.
+ * Вся геометрия и размеры приходят из оформления (gost): здесь нет размеров символов.
+ */
+import { EXAMPLES } from '../core/examples.js';
+import { CALL_SYMBOLS, CASE_STYLES, COLUMN_HEIGHT_RANGE, IO_SYMBOLS, MERGE_RANGE, defaultOptions, normalizeOptions } from '../core/options.js';
+import { RESERVED } from '../core/parser.js';
+import { autoCommentText, buildGeometry, buildProject, collectNames, commentHeight, geomBounds, makeComment, newId, renumber } from '../core/project.js';
+import { checkGeometry } from '../core/validate.js';
+import { GOST, TEXTS } from '../gost/index.js';
+import { canvasBlob, jpegWithDpi, pngWithDpi, sceneToCanvas } from '../render/canvas.js';
+import { buildScene } from '../render/scene.js';
+import { escapeXml as esc, sceneToSvg, sceneToSvgFile } from '../render/svg.js';
+import { createTextEngine } from '../render/text.js';
+import { EXPORT, STORAGE_KEY, STATE_VERSION, TIMING, UNDO_DEPTH, VENDOR, ZOOM } from './config.js';
+import { sanitizeState } from './state.js';
+
+const gost = GOST;
+const M = gost.metrics;
+const SYM = gost.symbols;
+/** Шаги привязки при правке мышью: узел сетки, точный шаг (с Shift), полшага для изломов. */
+const GRID = M.unit, FINE = M.unit / 5, HALF = M.unit / 2;
+/** Допуски попадания, мм. */
+const TOL = { boundary: 0.06, port: M.unit / 2, portDrag: 0.36 * M.unit, dragStart: 0.18 * M.unit, dblClick: 0.4 * M.unit, coord: 1e-6 };
+const CSS_PX_PER_MM = 96 / 25.4;
+
 const $ = s => document.querySelector(s);
 const codeEl = $('#code'), hlEl = $('#hl'), gutterEl = $('#gutter'), board = $('#board'), boardWrap = $('#boardWrap');
 const sideEl = $('#side');
 
+// ---------- измерение текста шрифтом схемы ----------
+const measureCtx = document.createElement('canvas').getContext('2d');
+const plainWidths = new Map();
+const MEASURE_PX = 100;
+function measurePlain(str, pt) {
+  let w = plainWidths.get(str);
+  if (w === undefined) { measureCtx.font = `${MEASURE_PX}px ${M.font.css}`; w = measureCtx.measureText(str).width / MEASURE_PX; plainWidths.set(str, w); }
+  return w * pt * M.pt;
+}
+const text = createTextEngine(gost, measurePlain);
+const measureMarkup = text.measure;
+function resetMeasureCache() { plainWidths.clear(); text.reset(); }
+
 const S = {
-  code: '', exId: 'lr3', names: {}, edits: {}, ifopts: {}, manual: {}, active: null,
-  opts: { mergeN: 3, collapseIO: true, maxH: 245, autoBuild: true },
+  code: '', exId: EXAMPLES[0].id, names: {}, edits: {}, ifopts: {}, manual: {}, active: null,
+  opts: defaultOptions(gost),
   ui: { grid: true, zoom: null, side: 'props' },
-  exp: { fmt: 'png', bg: 'white', fill: 'white', dpi: 300, caption: false }
+  exp: { fmt: EXPORT.formats[0], bg: 'white', fill: 'white', dpi: EXPORT.defaultDpi, caption: false }
 };
-let project = null, geoms = {}, sel = null, tool = 'select', draft = null, drag = null, lastFit = 1;
+let project = null, geoms = {}, sel = null, tool = 'select', draft = null, drag = null;
 let undoStack = [], redoStack = [];
 let lastLineClick = null;
-const env = () => ({ names: S.names, opts: S.opts, edits: S.edits, ifopts: S.ifopts, measure: measureMarkup });
-const clone = o => JSON.parse(JSON.stringify(o));
+const env = () => ({ names: S.names, opts: S.opts, edits: S.edits, ifopts: S.ifopts, measure: measureMarkup, gost });
+const clone = o => structuredClone(o);
 
 // ---------- сохранение ----------
 let saveT = null;
 function save() {
   clearTimeout(saveT);
   saveT = setTimeout(() => {
-    try { localStorage.setItem(LS_KEY, JSON.stringify({ code: S.code, exId: S.exId, names: S.names, edits: S.edits, ifopts: S.ifopts, manual: S.manual, opts: S.opts, ui: S.ui, exp: S.exp, active: S.active })); } catch (e) { /* хранилище недоступно */ }
-  }, 300);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STATE_VERSION, code: S.code, exId: S.exId, names: S.names, edits: S.edits, ifopts: S.ifopts, manual: S.manual, opts: S.opts, ui: S.ui, exp: S.exp, active: S.active })); } catch { /* хранилище недоступно или переполнено */ }
+  }, TIMING.saveDelay);
 }
 function load() {
-  try { const raw = localStorage.getItem(LS_KEY); if (raw) { const d = JSON.parse(raw); Object.assign(S, d, { opts: Object.assign(S.opts, d.opts || {}), ui: Object.assign(S.ui, d.ui || {}), exp: Object.assign(S.exp, d.exp || {}) }); return true; } } catch (e) { /* пусто */ }
-  return false;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    Object.assign(S, sanitizeState(JSON.parse(raw), S, gost));
+    return true;
+  } catch { return false; /* повреждённое сохранение — начинаем с примера */ }
 }
 function snapshot() { return JSON.stringify({ names: S.names, edits: S.edits, ifopts: S.ifopts, manual: S.manual }); }
-function pushUndo() { undoStack.push(snapshot()); if (undoStack.length > 80) undoStack.shift(); redoStack = []; updUndo(); }
+function pushUndo() { undoStack.push(snapshot()); if (undoStack.length > UNDO_DEPTH) undoStack.shift(); redoStack = []; updUndo(); }
 function restore(snap) { const d = JSON.parse(snap); S.names = d.names; S.edits = d.edits; S.ifopts = d.ifopts; S.manual = d.manual; sel = null; rebuild(); }
 function undo() { if (!undoStack.length) return; redoStack.push(snapshot()); restore(undoStack.pop()); updUndo(); }
 function redo() { if (!redoStack.length) return; undoStack.push(snapshot()); restore(redoStack.pop()); updUndo(); }
@@ -39,7 +78,7 @@ function updUndo() { $('#undoBtn').disabled = !undoStack.length; $('#redoBtn').d
 
 // ---------- уведомления ----------
 let toastT = null;
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600); }
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), TIMING.toast); }
 
 // ---------- редактор кода ----------
 function highlight(src) {
@@ -69,17 +108,21 @@ codeEl.addEventListener('scroll', syncScroll);
 let buildT = null;
 codeEl.addEventListener('input', () => {
   S.code = codeEl.value; refreshEditor(); save();
-  if (S.opts.autoBuild) { clearTimeout(buildT); buildT = setTimeout(() => rebuild(), 700); }
+  if (S.opts.autoBuild) { clearTimeout(buildT); buildT = setTimeout(() => rebuild(), TIMING.buildDelay); }
 });
 codeEl.addEventListener('keydown', e => {
   if (e.key === 'Tab') { e.preventDefault(); const s = codeEl.selectionStart, en = codeEl.selectionEnd; codeEl.setRangeText('  ', s, en, 'end'); codeEl.dispatchEvent(new Event('input')); }
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); rebuild(); }
 });
+/** Сколько строк оставить над строкой, к которой переходим. */
+const CONTEXT_LINES = 5;
+const MAX_MESSAGES = 12;
 function gotoLine(line) {
   const lines = codeEl.value.split('\n'); let pos = 0;
   for (let i = 0; i < line - 1 && i < lines.length; i++) pos += lines[i].length + 1;
   codeEl.focus(); codeEl.setSelectionRange(pos, pos + (lines[line - 1] || '').length);
-  codeEl.scrollTop = Math.max(0, (line - 5) * 20);
+  const lineH = parseFloat(getComputedStyle(codeEl).lineHeight) || 0;
+  codeEl.scrollTop = Math.max(0, (line - CONTEXT_LINES) * lineH);
 }
 
 // ---------- построение ----------
@@ -118,8 +161,8 @@ function renderMsgs() {
   const box = $('#msgs'); errLines = new Set();
   const errs = (project && project.errors) || [];
   let h = '';
-  for (const e of errs.slice(0, 12)) { errLines.add(e.line); h += `<div class="msg"><button type="button" data-line="${e.line}">строка ${e.line}</button><span>${esc(e.msg)}</span></div>`; }
-  if (errs.length > 12) h += `<div class="msg info">и ещё ${errs.length - 12}</div>`;
+  for (const e of errs.slice(0, MAX_MESSAGES)) { errLines.add(e.line); h += `<div class="msg"><button type="button" data-line="${e.line}">строка ${e.line}</button><span>${esc(e.msg)}</span></div>`; }
+  if (errs.length > MAX_MESSAGES) h += `<div class="msg info">и ещё ${errs.length - MAX_MESSAGES}</div>`;
   const skipped = project ? project.diagrams.filter(d => d.empty) : [];
   if (skipped.length) h += `<div class="msg info">Без схемы (нет действий, влияющих на алгоритм): ${skipped.map(d => esc(d.R ? d.R.short : 'основная программа')).join(', ')}</div>`;
   if (project && !project.diagrams.length && S.code.trim()) h += `<div class="msg info">В тексте не найдено ни основной программы, ни подпрограмм с телом begin…end.</div>`;
@@ -139,13 +182,18 @@ function renderTabs() {
 
 // ---------- доска ----------
 let frame = null, zoom = 1;
-const PAD = 16;
+/** Поле вокруг листа на экране (место для размерных линий), мм. */
+const PAD = 3.2 * M.unit;
+/** Масштаб «по ширине»: лист целиком по ширине; мелкие схемы не растягиваются сверх ZOOM.fitMax. */
 function fitZoom(b) {
-  const w = boardWrap.clientWidth - 24, h = boardWrap.clientHeight - 24;
-  const pxmm = 96 / 25.4;
-  const zw = w / ((b.W + 2 * PAD) * pxmm), zh = h / ((b.H + 2 * PAD) * pxmm);
-  return Math.max(0.3, Math.min(3, Math.min(zw, zh < 0.55 ? zw : Math.max(zh, Math.min(zw, 1.2)))));
+  const w = boardWrap.clientWidth - ZOOM.fitInsetPx, h = boardWrap.clientHeight - ZOOM.fitInsetPx;
+  const zw = w / ((b.W + 2 * PAD) * CSS_PX_PER_MM), zh = h / ((b.H + 2 * PAD) * CSS_PX_PER_MM);
+  const fit = zh < ZOOM.readable ? zw : Math.max(zh, Math.min(zw, ZOOM.fitMax));
+  return Math.max(ZOOM.fitMin, Math.min(ZOOM.fitLimit, Math.min(zw, fit)));
 }
+let boardFrame = 0;
+/** Перерисовка листа не чаще одного раза за кадр (при перетаскивании). */
+function scheduleBoard() { if (!boardFrame) boardFrame = requestAnimationFrame(() => { boardFrame = 0; renderBoard(); }); }
 function renderBoard() {
   const g = G(); const empty = $('#emptyState');
   if (!g) {
@@ -155,23 +203,22 @@ function renderBoard() {
     $('#status').innerHTML = ''; return;
   }
   empty.hidden = true;
-  renumber(g);
-  const b = (drag && drag.frozen) ? drag.frozen : geomBounds(g, measureMarkup); frame = b;
+  renumber(g, gost);
+  const b = (drag && drag.frozen) ? drag.frozen : geomBounds(g, measureMarkup, gost); frame = b;
   if (S.ui.zoom == null) zoom = fitZoom(b); else zoom = S.ui.zoom;
   $('#zoomVal').textContent = Math.round(zoom * 100) + '%';
   const vb = [b.x0 - PAD, b.y0 - PAD, b.W + 2 * PAD, b.H + 2 * PAD];
-  const pxmm = 96 / 25.4 * zoom;
+  const pxmm = CSS_PX_PER_MM * zoom;
   board.setAttribute('viewBox', vb.join(' '));
   board.setAttribute('width', Math.round(vb[2] * pxmm)); board.setAttribute('height', Math.round(vb[3] * pxmm));
-  const r = renderSVG(g, { interactive: true });
-  const maxH = S.opts.maxH || 245;
-  let s = `<defs>
-    <pattern id="gm1" width="1" height="1" patternUnits="userSpaceOnUse"><path d="M1 0H0V1" fill="none" stroke="#E4A27A" stroke-width="0.035" opacity=".55"/></pattern>
-    <pattern id="gm5" width="5" height="5" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="url(#gm1)"/><path d="M5 0H0V5" fill="none" stroke="#E4A27A" stroke-width="0.07" opacity=".8"/></pattern>
-    <pattern id="gm10" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="url(#gm5)"/><path d="M10 0H0V10" fill="none" stroke="#DA8B5B" stroke-width="0.12" opacity=".75"/></pattern>
-  </defs>`;
-  s += `<rect x="${b.x0}" y="${b.y0}" width="${b.W}" height="${b.H}" fill="#fff" stroke="#9aa39c" stroke-width="0.15"/>`;
-  if (S.ui.grid) s += `<rect x="${b.x0}" y="${b.y0}" width="${b.W}" height="${b.H}" fill="url(#gm10)" pointer-events="none"/>`;
+  const scene = buildScene(g, gost, text);
+  const r = { body: sceneToSvg(scene, gost, { interactive: true }), overflow: scene.overflow };
+  const maxH = S.opts.maxH;
+  // миллиметровая сетка: шаг FINE, узлы GRID, двойной шаг выделен
+  const cell = (id, size, inner, cls) => `<pattern id="${id}" width="${size}" height="${size}" patternUnits="userSpaceOnUse">${inner ? `<rect width="${size}" height="${size}" fill="url(#${inner})"/>` : ''}<path class="${cls}" d="M${size} 0H0V${size}"/></pattern>`;
+  let s = `<defs>${cell('gridFine', FINE, null, 'grid-fine')}${cell('gridUnit', GRID, 'gridFine', 'grid-unit')}${cell('gridMajor', 2 * GRID, 'gridUnit', 'grid-major')}</defs>`;
+  s += `<rect class="sheet" x="${b.x0}" y="${b.y0}" width="${b.W}" height="${b.H}"/>`;
+  if (S.ui.grid) s += `<rect x="${b.x0}" y="${b.y0}" width="${b.W}" height="${b.H}" fill="url(#gridMajor)" pointer-events="none"/>`;
   s += `<g id="content">${r.body}</g>`;
   s += overlay(g, r.overflow);
   s += dims(b, maxH);
@@ -181,49 +228,58 @@ function renderBoard() {
   lastOverflow = r.overflow;
 }
 let lastOverflow = [];
+/** Размерные линии листа: ширина и высота в мм, красным — если лист больше страницы. */
 function dims(b, maxH) {
-  const badW = b.W > 170, badH = b.H > maxH;
-  const cw = badW ? '#BF3328' : '#5A635E', ch = badH ? '#BF3328' : '#5A635E';
-  const y = b.y0 - 7, x = b.x0 - 7, sw = 0.18;
-  const tri = (px, py, dx, dy, c) => `<path d="M${px} ${py}L${px - dx * 2.6 - dy * 0.55} ${py - dy * 2.6 - dx * 0.55}L${px - dx * 2.6 + dy * 0.55} ${py - dy * 2.6 + dx * 0.55}Z" fill="${c}"/>`;
-  let s = `<g class="dims" pointer-events="none">`;
-  s += `<path d="M${b.x0} ${b.y0 - 1.5}V${y - 2}M${b.x0 + b.W} ${b.y0 - 1.5}V${y - 2}M${b.x0} ${y}H${b.x0 + b.W}" stroke="${cw}" stroke-width="${sw}" fill="none"/>`;
-  s += tri(b.x0, y, -1, 0, cw) + tri(b.x0 + b.W, y, 1, 0, cw);
-  s += `<text x="${b.x0 + b.W / 2}" y="${y - 1.4}" text-anchor="middle" font-size="3.6" fill="${cw}">${b.W}${badW ? ' > 170' : ''}</text>`;
-  s += `<path d="M${b.x0 - 1.5} ${b.y0}H${x - 2}M${b.x0 - 1.5} ${b.y0 + b.H}H${x - 2}M${x} ${b.y0}V${b.y0 + b.H}" stroke="${ch}" stroke-width="${sw}" fill="none"/>`;
-  s += tri(x, b.y0, 0, -1, ch) + tri(x, b.y0 + b.H, 0, 1, ch);
-  s += `<text transform="translate(${x - 1.4} ${b.y0 + b.H / 2}) rotate(-90)" text-anchor="middle" font-size="3.6" fill="${ch}">${b.H}${badH ? ' > ' + maxH : ''}</text>`;
+  const pageW = M.page.width;
+  const badW = b.W > pageW, badH = b.H > maxH;
+  const off = 1.4 * M.unit, ext = 0.3 * M.unit, tick = 0.4 * M.unit, textGap = 0.28 * M.unit;
+  const arrow = { len: 0.52 * M.unit, half: 0.11 * M.unit };
+  const y = b.y0 - off, x = b.x0 - off;
+  const tri = (px, py, dx, dy) => `<path class="dim-arrow" d="M${px} ${py}L${px - dx * arrow.len - dy * arrow.half} ${py - dy * arrow.len - dx * arrow.half}L${px - dx * arrow.len + dy * arrow.half} ${py - dy * arrow.len + dx * arrow.half}Z"/>`;
+  let s = `<g class="dims${badW ? ' bad' : ''}" pointer-events="none">`;
+  s += `<path class="dim-line" d="M${b.x0} ${b.y0 - ext}V${y - tick}M${b.x0 + b.W} ${b.y0 - ext}V${y - tick}M${b.x0} ${y}H${b.x0 + b.W}"/>`;
+  s += tri(b.x0, y, -1, 0) + tri(b.x0 + b.W, y, 1, 0);
+  s += `<text x="${b.x0 + b.W / 2}" y="${y - textGap}" text-anchor="middle">${b.W}${badW ? ' > ' + pageW : ''}</text></g>`;
+  s += `<g class="dims${badH ? ' bad' : ''}" pointer-events="none">`;
+  s += `<path class="dim-line" d="M${b.x0 - ext} ${b.y0}H${x - tick}M${b.x0 - ext} ${b.y0 + b.H}H${x - tick}M${x} ${b.y0}V${b.y0 + b.H}"/>`;
+  s += tri(x, b.y0, 0, -1) + tri(x, b.y0 + b.H, 0, 1);
+  s += `<text transform="translate(${x - textGap} ${b.y0 + b.H / 2}) rotate(-90)" text-anchor="middle">${b.H}${badH ? ' > ' + maxH : ''}</text>`;
   return s + '</g>';
 }
+/** Рамка вокруг прямоугольной области с отступом. */
+const frameRect = (cls, x, y, w, h, pad) => `<rect class="${cls}" x="${x - pad}" y="${y - pad}" width="${w + 2 * pad}" height="${h + 2 * pad}" pointer-events="none"/>`;
+function commentWidth(it) { return Math.max(...String(it.text).split('\n').map(l => measureMarkup(l, it.size || M.font.commentPt))); }
+/** Служебный слой: выделение, ручки линии, отметки переполнения, черновик новой линии. */
 function overlay(g, overflow) {
+  const pad = { mark: 0.2 * M.unit, select: 0.32 * M.unit, label: 0.16 * M.unit, comment: 0.24 * M.unit };
+  const handle = 0.22 * M.unit;
   let s = '<g id="overlay">';
-  for (const id of overflow) { const b = g.items.find(i => i.id === id); if (b) { const [hw, hh] = shapeHalf(b); s += `<rect x="${b.x - hw - 1}" y="${b.y - hh - 1}" width="${2 * hw + 2}" height="${2 * hh + 2}" fill="none" stroke="#BF3328" stroke-width="0.35" stroke-dasharray="1.2 0.8" pointer-events="none"/>`; } }
+  for (const id of overflow) { const b = g.items.find(i => i.id === id); if (b) { const [hw, hh] = SYM.half(b.shape); s += frameRect('ov-overflow', b.x - hw, b.y - hh, 2 * hw, 2 * hh, pad.mark); } }
   const it = sel && g.items.find(i => i.id === sel);
   if (it) {
-    const blue = '#2447B5';
-    if (it.type === 'block') { const [hw, hh] = shapeHalf(it); s += `<rect x="${it.x - hw - 1.6}" y="${it.y - hh - 1.6}" width="${2 * hw + 3.2}" height="${2 * hh + 3.2}" fill="none" stroke="${blue}" stroke-width="0.4" stroke-dasharray="1.4 0.9" pointer-events="none"/>`; }
+    if (it.type === 'block') { const [hw, hh] = SYM.half(it.shape); s += frameRect('ov-select', it.x - hw, it.y - hh, 2 * hw, 2 * hh, pad.select); }
     else if (it.type === 'line') {
-      s += `<polyline points="${it.pts.map(p => p.join(',')).join(' ')}" fill="none" stroke="${blue}" stroke-width="1" opacity=".3" pointer-events="none"/>`;
+      s += `<polyline class="ov-line" points="${it.pts.map(p => p.join(',')).join(' ')}" pointer-events="none"/>`;
       for (let k = 0; k + 1 < it.pts.length; k++) {
         const [ax, ay] = it.pts[k], [bx, by] = it.pts[k + 1];
-        s += `<line data-id="${it.id}" data-part="s:${k}" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="transparent" stroke-width="2.4" style="cursor:${Math.abs(ax - bx) < 1e-6 ? 'ew-resize' : 'ns-resize'}"/>`;
+        s += `<line class="ov-seg ${Math.abs(ax - bx) < TOL.coord ? 'v' : 'h'}" data-id="${esc(it.id)}" data-part="s:${k}" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}"/>`;
       }
-      it.pts.forEach((p, k) => { s += `<rect data-id="${it.id}" data-part="v:${k}" x="${p[0] - 1.1}" y="${p[1] - 1.1}" width="2.2" height="2.2" fill="#fff" stroke="${blue}" stroke-width="0.35" style="cursor:move"/>`; });
-    } else if (it.type === 'label') { const w = measureMarkup(it.text, 9); s += `<rect x="${it.x - 0.8}" y="${it.y - 2.4}" width="${w + 1.6}" height="4.8" fill="none" stroke="${blue}" stroke-width="0.35" stroke-dasharray="1 0.7" pointer-events="none"/>`; }
-    else if (it.type === 'comment') { const lines = String(it.text).split('\n'); const w = Math.max(...lines.map(l => measureMarkup(l, it.size || 8.5))); s += `<rect x="${it.bx - 1.2}" y="${it.by - it.h / 2 - 1.2}" width="${w + 6.4}" height="${it.h + 2.4}" fill="none" stroke="${blue}" stroke-width="0.35" stroke-dasharray="1.4 0.9" pointer-events="none"/>`; }
+      it.pts.forEach((p, k) => { s += `<rect class="ov-handle" data-id="${esc(it.id)}" data-part="v:${k}" x="${p[0] - handle}" y="${p[1] - handle}" width="${2 * handle}" height="${2 * handle}"/>`; });
+    } else if (it.type === 'label') s += frameRect('ov-select thin', it.x, it.y - M.label.halfHeight, measureMarkup(it.text, M.font.labelPt), 2 * M.label.halfHeight, pad.label);
+    else if (it.type === 'comment') s += frameRect('ov-select', it.bx, it.by - it.h / 2, commentWidth(it) + M.comment.textGap, it.h, pad.comment);
   }
   if (draft && draft.pts.length) {
     const pts = draft.pts.concat(draft.hover ? [draft.hover] : []);
-    s += `<polyline points="${pts.map(p => p.join(',')).join(' ')}" fill="none" stroke="#2447B5" stroke-width="0.45" stroke-dasharray="1.2 0.8" pointer-events="none"/>`;
-    pts.forEach(p => { s += `<circle cx="${p[0]}" cy="${p[1]}" r="0.7" fill="#2447B5" pointer-events="none"/>`; });
+    s += `<polyline class="ov-draft" points="${pts.map(p => p.join(',')).join(' ')}" pointer-events="none"/>`;
+    pts.forEach(p => { s += `<circle class="ov-draft-dot" cx="${p[0]}" cy="${p[1]}" r="${0.14 * M.unit}" pointer-events="none"/>`; });
   }
   return s + '</g>';
 }
 function renderStatus(g, b, overflow) {
-  const n = g.items.filter(i => i.type === 'block' && i.shape !== 'conn').length;
+  const n = g.items.filter(i => i.type === 'block' && SYM.get(i.shape).identified).length;
   const cols = g.cols || 1;
-  const maxH = S.opts.maxH || 245;
-  const parts = [`<span class="${b.W > 170 || b.H > maxH ? 'bad' : ''}">Холст ${b.W} × ${b.H} мм</span>`, `<span>Блоков: ${n}</span>`];
+  const maxH = S.opts.maxH;
+  const parts = [`<span class="${b.W > M.page.width || b.H > maxH ? 'bad' : ''}">Холст ${b.W} × ${b.H} мм</span>`, `<span>Блоков: ${n}</span>`];
   if (cols > 1) parts.push(`<span>Колонок: ${cols}, есть перенос</span>`);
   if (overflow.length) parts.push(`<span class="bad">Текст не помещается: ${overflow.length}</span>`);
   if (tool === 'line') parts.push('<span>Линия: щёлкайте по точкам; двойной щелчок или Enter — завершить, Esc — отменить</span>');
@@ -249,24 +305,16 @@ function resetManual() { if (!confirm('Вернуть автоматическу
 // ---------- координаты ----------
 function svgPoint(ev) { const pt = board.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY; const p = pt.matrixTransform(board.getScreenCTM().inverse()); return [p.x, p.y]; }
 const snap = (v, st) => Math.round(v / st) * st;
-function ports(b) {
-  const [hw, hh] = shapeHalf(b);
-  return [[b.x, b.y - hh], [b.x, b.y + hh], [b.x - hw, b.y], [b.x + hw, b.y]];
-}
-function onBoundary(b, p) {
-  const [hw, hh] = shapeHalf(b); const [x, y] = p; const e = 0.06;
-  if (b.shape === 'dia') return ports(b).some(q => Math.abs(q[0] - x) < e && Math.abs(q[1] - y) < e);
-  if (b.shape === 'conn') return Math.abs(Math.hypot(x - b.x, y - b.y) - 5) < e;
-  const inX = x >= b.x - hw - e && x <= b.x + hw + e, inY = y >= b.y - hh - e && y <= b.y + hh + e;
-  return (inX && (Math.abs(y - (b.y - hh)) < e || Math.abs(y - (b.y + hh)) < e)) || (inY && (Math.abs(x - (b.x - hw)) < e || Math.abs(x - (b.x + hw)) < e));
-}
+/** Точки присоединения линий к символу: середины сторон (п. 4.2.4). */
+function ports(b) { const p = SYM.ports(b.shape, b.x, b.y); return [p.top, p.bottom, p.left, p.right]; }
+function onBoundary(b, p) { return SYM.onBoundary(b.shape, p[0] - b.x, p[1] - b.y, TOL.boundary); }
 function nearestPort(g, x, y, r) {
-  let best = null, bd = r || 2.5;
+  let best = null, bd = r || TOL.port;
   for (const b of g.items) if (b.type === 'block') for (const q of ports(b)) { const d = Math.hypot(q[0] - x, q[1] - y); if (d < bd) { bd = d; best = q; } }
   return best;
 }
 function cleanPts(pts) {
-  let res = [];
+  const res = [];
   for (const p of pts) { const l = res[res.length - 1]; if (!l || Math.hypot(l[0] - p[0], l[1] - p[1]) > 1e-6) res.push([Math.round(p[0] * 1000) / 1000, Math.round(p[1] * 1000) / 1000]); }
   let changed = true;
   while (changed && res.length > 2) {
@@ -287,8 +335,8 @@ function moveEnd(orig, end, dx, dy) {
     const other = orig[nb].slice();
     if ((vert && Math.abs(dx) < 1e-6) || (!vert && Math.abs(dy) < 1e-6)) { pts[k] = p; return pts; }
     let mid;
-    if (vert) { const my = snap((p[1] + other[1]) / 2, 2.5); mid = [[p[0], my], [other[0], my]]; }
-    else { const mx = snap((p[0] + other[0]) / 2, 2.5); mid = [[mx, p[1]], [mx, other[1]]]; }
+    if (vert) { const my = snap((p[1] + other[1]) / 2, HALF); mid = [[p[0], my], [other[0], my]]; }
+    else { const mx = snap((p[0] + other[0]) / 2, HALF); mid = [[mx, p[1]], [mx, other[1]]]; }
     return end === 0 ? [p, ...mid, other] : [other, ...mid.reverse(), p];
   }
   pts[k] = p;
@@ -296,9 +344,9 @@ function moveEnd(orig, end, dx, dy) {
   return pts;
 }
 function moveVertex(orig, k, q) {
-  let pts = orig.map(p => p.slice()); const n = pts.length;
+  const pts = orig.map(p => p.slice()); const n = pts.length;
   pts[k] = q.slice();
-  const fix = (j, before) => {
+  const fix = (j) => {
     const vert = Math.abs(orig[j][0] - orig[k][0]) < 1e-6;
     const isEnd = j === 0 || j === n - 1;
     if (!isEnd) { if (vert) pts[j][0] = q[0]; else pts[j][1] = q[1]; return null; }
@@ -319,7 +367,7 @@ function moveSegment(orig, k, dx, dy) {
   if (k > 0 && k + 1 < n - 1) { const pts = orig.map(p => p.slice()); pts[k] = mv(orig[k]); pts[k + 1] = mv(orig[k + 1]); return pts; }
   const jog = (A, B) => { // A — закреплённый конец, B — следующая точка
     const len = vert ? B[1] - A[1] : B[0] - A[0];
-    const s = Math.sign(len) * Math.min(5, Math.abs(len) / 2);
+    const s = Math.sign(len) * Math.min(GRID, Math.abs(len) / 2);
     const J1 = vert ? [A[0], A[1] + s] : [A[0] + s, A[1]];
     return [A, J1, mv(J1), mv(B)];
   };
@@ -336,7 +384,7 @@ board.addEventListener('pointerdown', ev => {
   if (tool === 'line') {
     ev.preventDefault();
     const now = performance.now(); const lc = lastLineClick;
-    const dbl = lc && now - lc.t < 400 && Math.hypot(lc.x - mx, lc.y - my) < 2;
+    const dbl = lc && now - lc.t < TIMING.doubleClick && Math.hypot(lc.x - mx, lc.y - my) < TOL.dblClick;
     lastLineClick = { t: now, x: mx, y: my };
     lineClick(mx, my, dbl); return;
   }
@@ -361,16 +409,16 @@ function segDist(p, a, b) {
   return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
 }
 board.addEventListener('pointermove', ev => {
-  if (tool === 'line' && draft) { const [mx, my] = svgPoint(ev); draft.hover = lineNext(mx, my); renderBoard(); return; }
+  if (tool === 'line' && draft) { const [mx, my] = svgPoint(ev); draft.hover = lineNext(mx, my); scheduleBoard(); return; }
   if (!drag) return;
   if (drag.pan) { boardWrap.scrollLeft = drag.sl - (ev.clientX - drag.sx); boardWrap.scrollTop = drag.st - (ev.clientY - drag.sy); return; }
   const [mx, my] = svgPoint(ev); const dx = mx - drag.start[0], dy = my - drag.start[1];
-  if (!drag.moved) { if (Math.hypot(dx, dy) < 0.9) return; beginDrag(); }
-  applyDrag(dx, dy, ev.shiftKey, [mx, my]);
-  renderBoard();
+  if (!drag.moved) { if (Math.hypot(dx, dy) < TOL.dragStart) return; beginDrag(); }
+  applyDrag(dx, dy, ev.shiftKey);
+  scheduleBoard();
 });
-board.addEventListener('pointerup', ev => endDrag());
-board.addEventListener('pointercancel', ev => endDrag());
+board.addEventListener('pointerup', endDrag);
+board.addEventListener('pointercancel', endDrag);
 board.addEventListener('dblclick', ev => {
   if (tool === 'line') { finishLine(); return; }
   const t = ev.target.closest('[data-id]'); if (!t) return;
@@ -396,7 +444,7 @@ function beginDrag() {
 }
 // Т-образные примыкания: концы других линий, лежащие на перемещаемой линии, следуют за ней
 function onSegment(p, a, b) {
-  const e = 0.06;
+  const e = TOL.boundary;
   if (Math.abs(a[0] - b[0]) < 1e-6) return Math.abs(p[0] - a[0]) < e && p[1] >= Math.min(a[1], b[1]) - e && p[1] <= Math.max(a[1], b[1]) + e;
   if (Math.abs(a[1] - b[1]) < 1e-6) return Math.abs(p[1] - a[1]) < e && p[0] >= Math.min(a[0], b[0]) - e && p[0] <= Math.max(a[0], b[0]) + e;
   return false;
@@ -410,7 +458,7 @@ function collectTJ(g, hostIds) {
       if (L.type !== 'line' || hs.has(L.id)) continue;
       [0, L.pts.length - 1].forEach((ei, idx) => {
         const p = L.pts[ei];
-        if (Math.hypot(p[0] - A[0][0], p[1] - A[0][1]) < 0.06 || Math.hypot(p[0] - A[n - 1][0], p[1] - A[n - 1][1]) < 0.06) return;
+        if (Math.hypot(p[0] - A[0][0], p[1] - A[0][1]) < TOL.boundary || Math.hypot(p[0] - A[n - 1][0], p[1] - A[n - 1][1]) < TOL.boundary) return;
         for (let k = 0; k + 1 < n; k++) if (onSegment(p, A[k], A[k + 1])) {
           const vert = Math.abs(A[k][0] - A[k + 1][0]) < 1e-6;
           res.push({ id: L.id, end: idx, pts: clone(L.pts), host: hid, vert, coord: vert ? A[k][0] : A[k][1], other: vert ? p[1] : p[0] });
@@ -428,7 +476,7 @@ function updateTJ(g) {
     for (let k = 0; k + 1 < H.pts.length; k++) {
       const a = H.pts[k], b = H.pts[k + 1]; const vert = Math.abs(a[0] - b[0]) < 1e-6;
       if (vert !== t.vert) continue;
-      const lo = Math.min(t.vert ? a[1] : a[0], t.vert ? b[1] : b[0]) - 0.06, hi = Math.max(t.vert ? a[1] : a[0], t.vert ? b[1] : b[0]) + 0.06;
+      const lo = Math.min(t.vert ? a[1] : a[0], t.vert ? b[1] : b[0]) - TOL.boundary, hi = Math.max(t.vert ? a[1] : a[0], t.vert ? b[1] : b[0]) + TOL.boundary;
       if (t.other < lo || t.other > hi) continue;
       const c = t.vert ? a[0] : a[1];
       if (best === null || Math.abs(c - t.coord) < Math.abs(best - t.coord)) best = c;
@@ -438,11 +486,11 @@ function updateTJ(g) {
     L.pts = Math.abs(d) < 1e-9 ? clone(t.pts) : moveEnd(t.pts, t.end, t.vert ? d : 0, t.vert ? 0 : d);
   }
 }
-function applyDrag(dx, dy, fine, mp) {
+function applyDrag(dx, dy, fine) {
   const g = G(); const it = g.items.find(i => i.id === drag.id); if (!it) return;
   const o = drag.orig;
   if (it.type === 'block') {
-    const st = fine ? 1 : 5; const sx = snap(dx, st), sy = snap(dy, st);
+    const st = fine ? FINE : GRID; const sx = snap(dx, st), sy = snap(dy, st);
     it.x = o.x + sx; it.y = o.y + sy;
     for (const a of drag.att) {
       const l = g.items.find(i => i.id === a.id); if (!l) continue;
@@ -450,12 +498,12 @@ function applyDrag(dx, dy, fine, mp) {
     }
     for (const w of drag.owned) { const ob = g.items.find(i => i.id === w.id); if (!ob) continue; if (ob.type === 'label') { ob.x = w.o.x + sx; ob.y = w.o.y + sy; } else { ob.bx = w.o.bx + sx; ob.by = w.o.by + sy; } }
     updateTJ(g);
-  } else if (it.type === 'label') { it.x = o.x + snap(dx, 0.5); it.y = o.y + snap(dy, 0.5); }
-  else if (it.type === 'comment') { it.bx = o.bx + snap(dx, 0.5); it.by = o.by + snap(dy, 0.5); }
+  } else if (it.type === 'label') { it.x = o.x + snap(dx, M.label.step); it.y = o.y + snap(dy, M.label.step); }
+  else if (it.type === 'comment') { it.bx = o.bx + snap(dx, M.label.step); it.by = o.by + snap(dy, M.label.step); }
   else if (it.type === 'line') {
-    const st = fine ? 1 : 5;
+    const st = fine ? FINE : GRID;
     const [kind, ks] = (drag.part || '').split(':'); const k = +ks;
-    if (kind === 'v') { const q = [snap(o.pts[k][0] + dx, st), snap(o.pts[k][1] + dy, st)]; const port = nearestPort(g, o.pts[k][0] + dx, o.pts[k][1] + dy, 1.8); it.pts = moveVertex(o.pts, k, port || q); }
+    if (kind === 'v') { const q = [snap(o.pts[k][0] + dx, st), snap(o.pts[k][1] + dy, st)]; const port = nearestPort(g, o.pts[k][0] + dx, o.pts[k][1] + dy, TOL.portDrag); it.pts = moveVertex(o.pts, k, port || q); }
     else if (kind === 's') it.pts = moveSegment(o.pts, k, snap(dx, st), snap(dy, st));
     updateTJ(g);
   }
@@ -474,25 +522,28 @@ function endDrag() {
 function select(id) { sel = id; renderBoard(); renderSide(); }
 
 // ---------- добавление элементов ----------
-const DEFAULT_TEXT = { term: 'Конец', rect: 'Действие', dia: 'Условие', lbeg: 'Цикл A\n1 ≤ i ≤ n', lend: 'Цикл A\ni', conn: 'A' };
+/** Текст нового символа, поставленного вручную. */
+const DEFAULT_TEXT = { term: TEXTS.end, rect: 'Действие', data: TEXTS.input + ' x', predef: 'Подпрограмма', dia: 'Условие', lbeg: TEXTS.loop + ' A\n1 ≤ i ≤ n', lend: TEXTS.loop + ' A\ni', conn: 'A' };
+/** В каком радиусе новая подпись ищет «Решение», к которому относится. */
+const OWNER_SEARCH_RADIUS = 6 * M.unit;
 function nearestCol(g, x) { let best = 0, bd = Infinity; for (const b of g.items) if (b.type === 'block') { const d = Math.abs(b.x - x); if (d < bd) { bd = d; best = b.col || 0; } } return best; }
 function addAt(kind, x, y) {
   pushUndo(); const g = ensureManual();
   if (kind === 'label') {
-    const it = { id: newId('t'), type: 'label', x: snap(x, 0.5), y: snap(y, 0.5), text: 'Да', owner: null };
-    let best = null, bd = 30; for (const b of g.items) if (b.type === 'block' && b.shape === 'dia') { const d = Math.hypot(b.x - x, b.y - y); if (d < bd) { bd = d; best = b; } }
+    const it = { id: newId('t'), type: 'label', x: snap(x, M.label.step), y: snap(y, M.label.step), text: TEXTS.yes, owner: null };
+    let best = null, bd = OWNER_SEARCH_RADIUS; for (const b of g.items) if (b.type === 'block' && b.shape === 'dia') { const d = Math.hypot(b.x - x, b.y - y); if (d < bd) { bd = d; best = b; } }
     if (best) it.owner = best.id;
     g.items.push(it); sel = it.id;
   } else {
-    const it = { id: newId('b'), type: 'block', shape: kind, x: snap(x, 5), y: snap(y, 5), text: DEFAULT_TEXT[kind], size: null, key: null, kind: null, col: nearestCol(g, x) };
+    const it = { id: newId('b'), type: 'block', shape: kind, x: snap(x, GRID), y: snap(y, GRID), text: DEFAULT_TEXT[kind], size: null, key: null, kind: null, col: nearestCol(g, x) };
     g.items.push(it); sel = it.id;
   }
   save(); renderBoard(); renderSide();
   const ta = sideEl.querySelector('textarea, input[type=text]'); if (ta) { ta.focus(); ta.select(); }
 }
 function lineNext(x, y) {
-  const g = G(); const port = nearestPort(g, x, y, 2.5);
-  let q = port || [snap(x, 5), snap(y, 5)];
+  const g = G(); const port = nearestPort(g, x, y);
+  let q = port || [snap(x, GRID), snap(y, GRID)];
   if (draft && draft.pts.length) {
     const l = draft.pts[draft.pts.length - 1];
     if (Math.abs(q[0] - l[0]) >= Math.abs(q[1] - l[1])) q = [q[0], l[1]]; else q = [l[0], q[1]];
@@ -500,10 +551,10 @@ function lineNext(x, y) {
   return q;
 }
 function lineClick(x, y, dbl) {
-  if (!draft) { const g = G(); const port = nearestPort(g, x, y, 2.5); draft = { pts: [port || [snap(x, 5), snap(y, 5)]] }; renderBoard(); return; }
+  if (!draft) { const g = G(); const port = nearestPort(g, x, y); draft = { pts: [port || [snap(x, GRID), snap(y, GRID)]] }; renderBoard(); return; }
   const q = lineNext(x, y); const l = draft.pts[draft.pts.length - 1];
   if (Math.hypot(q[0] - l[0], q[1] - l[1]) > 1e-6) draft.pts.push(q);
-  const g = G(); const port = nearestPort(g, x, y, 2.5);
+  const g = G(); const port = nearestPort(g, x, y);
   if (dbl || (port && draft.pts.length > 1 && Math.hypot(port[0] - q[0], port[1] - q[1]) < 1e-6)) finishLine(); else renderBoard();
 }
 function finishLine() {
@@ -522,7 +573,7 @@ function setTool(t) {
 document.querySelectorAll('#toolbar [data-tool]').forEach(b => b.onclick = () => setTool(b.dataset.tool === tool && tool !== 'select' ? 'select' : b.dataset.tool));
 
 // ---------- удаление и сдвиг ----------
-const HIDEABLE = new Set(['in', 'out', 'proc', 'err']);
+const HIDEABLE = new Set(['in', 'out', 'proc', 'call', 'err']);
 function deleteSelected() {
   const g = G(); if (!g || !sel) return;
   const it = g.items.find(i => i.id === sel); if (!it) return;
@@ -548,7 +599,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'v' || e.key === 'V' || e.key === 'м' || e.key === 'М') setTool('select');
   else if (e.key === 'l' || e.key === 'L' || e.key === 'д' || e.key === 'Д') setTool('line');
   else if (sel && e.key.startsWith('Arrow')) {
-    e.preventDefault(); const st = e.shiftKey ? 1 : 5;
+    e.preventDefault(); const st = e.shiftKey ? FINE : GRID;
     nudge(e.key === 'ArrowLeft' ? -st : e.key === 'ArrowRight' ? st : 0, e.key === 'ArrowUp' ? -st : e.key === 'ArrowDown' ? st : 0);
   }
 });
@@ -567,7 +618,7 @@ function insertAfter(b) {
   const E = edits(); E.inserted = E.inserted || {};
   let key = b.key; if (key.includes('+')) key = key.split('+')[0];
   if (key.endsWith(':b')) { toast('Добавьте действие после первого блока тела цикла'); return; }
-  (E.inserted[key] = E.inserted[key] || []).push('Новое действие');
+  (E.inserted[key] = E.inserted[key] || []).push(TEXTS.newAction);
   regen(S.active);
   const nb = G().items.find(i => i.type === 'block' && i.key === key + '+' + (E.inserted[key].length - 1));
   sel = nb ? nb.id : null; renderBoard(); renderSide(); save();
@@ -608,7 +659,7 @@ function setBlockText(b, text, size) {
 function setComment(text) {
   const E = edits(); E.comment = text;
   const g = G(); const c = g.items.find(i => i.type === 'comment');
-  if (isManual()) { if (c) { c.text = text; c.userText = true; const nl = String(text).split('\n').length; c.h = Math.max(22, Math.ceil((nl * 8.5 * PT * 1.5 + 4) / 2) * 2); } else if (text.trim()) { const owner = g.items.find(i => i.id === sel) || g.items.find(i => i.type === 'block' && i.kind === 'in'); if (owner) g.items.push(makeComment(owner, text, measureMarkup)); } }
+  if (isManual()) { if (c) { c.text = text; c.userText = true; c.h = commentHeight(text, gost); } else if (text.trim()) { const owner = g.items.find(i => i.id === sel && i.type === 'block') || g.items.find(i => i.type === 'block' && i.kind === 'in'); if (owner) g.items.push(makeComment(owner, text, gost)); } }
   else regen(S.active);
   renderBoard(); save();
 }
@@ -617,7 +668,7 @@ function commentFor(b) {
   if (isManual()) {
     const g = G(); g.items = g.items.filter(i => i.type !== 'comment');
     const txt = E.comment || autoCommentText(diagById(S.active), env()) || 'x – …';
-    const c = makeComment(b, txt, measureMarkup); c.userText = true; g.items.push(c); E.comment = txt; sel = c.id;
+    const c = makeComment(b, txt, gost); c.userText = true; g.items.push(c); E.comment = txt; sel = c.id;
   } else {
     E.commentOwner = b.key; if (!E.comment && !autoCommentText(diagById(S.active), env())) E.comment = 'x – …';
     regen(S.active); const c = G().items.find(i => i.type === 'comment'); sel = c ? c.id : sel;
@@ -628,8 +679,9 @@ function commentFor(b) {
 
 // ---------- боковая панель ----------
 document.querySelectorAll('.side-tabs button').forEach(b => b.onclick = () => { S.ui.side = b.dataset.side; renderSide(); save(); });
-const SHAPE_NAME = { term: 'Начало / конец', rect: 'Процесс', dia: 'Условие', lbeg: 'Начало цикла', lend: 'Конец цикла', conn: 'Перенос' };
-const KIND_NAME = { in: 'ввод', out: 'вывод', err: 'вывод сообщения об ошибке', proc: 'вычисление', cond: 'проверка условия', loop: 'цикл со счётчиком', term: '' };
+const KIND_NAME = { in: 'ввод', out: 'вывод', err: 'вывод сообщения об ошибке', proc: 'вычисление', call: 'вызов подпрограммы', cond: 'проверка условия', loop: 'цикл со счётчиком', term: '' };
+/** Кегли, которые можно задать тексту символа вручную. */
+const FONT_SIZES = [7, 7.5, 8, 8.5, 9, 9.5, 10, 11, 12];
 function renderSide() {
   document.querySelectorAll('.side-tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.side === S.ui.side)));
   if (S.ui.side === 'names') return renderNames();
@@ -640,12 +692,13 @@ function renderSide() {
   if (!it) return renderDiagramProps(g);
   let h = '';
   if (it.type === 'block') {
-    const title = SHAPE_NAME[it.shape] + (it.num ? `, блок ${it.num}` : '');
+    const def = SYM.get(it.shape);
+    const title = `${def.title} (п. ${def.clause})` + (it.num ? `, блок ${it.num}` : '');
     const kn = KIND_NAME[it.kind] || '';
     h += `<h3>${esc(title)}</h3>${kn ? `<p class="hint" style="margin-top:-4px">${esc(kn)}</p>` : ''}`;
     h += `<label class="field">Текст в блоке<textarea id="pText" rows="3">${esc(it.text)}</textarea></label>`;
     if (it.shape !== 'conn') {
-      h += `<label class="field">Размер шрифта<select id="pSize"><option value="">Автоматически</option>${[7, 7.5, 8, 8.5, 9, 9.5, 10, 11, 12].map(v => `<option value="${v}" ${it.size === v ? 'selected' : ''}>${String(v).replace('.', ',')} pt</option>`).join('')}</select></label>`;
+      h += `<label class="field">Размер шрифта<select id="pSize"><option value="">Автоматически</option>${FONT_SIZES.map(v => `<option value="${v}" ${it.size === v ? 'selected' : ''}>${String(v).replace('.', ',')} pt</option>`).join('')}</select></label>`;
     }
     if (lastOverflow.includes(it.id)) h += `<p class="hint" style="color:var(--red)">Текст не помещается даже мелким шрифтом. Сократите формулировку, перенесите часть в комментарий или разбейте на строки.</p>`;
     h += `<div class="actions">`;
@@ -663,12 +716,13 @@ function renderSide() {
     h += `<h3>Соединительная линия</h3>`;
     h += `<label class="field">Стрелка<select id="pArrow"><option value="auto" ${it.arrow === 'auto' || !it.arrow ? 'selected' : ''}>По правилу (справа налево и снизу вверх)</option><option value="end" ${it.arrow === 'end' ? 'selected' : ''}>В конце линии</option><option value="none" ${it.arrow === 'none' ? 'selected' : ''}>Без стрелки</option></select></label>`;
     const lens = []; for (let k = 0; k + 1 < it.pts.length; k++) lens.push(Math.round(Math.hypot(it.pts[k + 1][0] - it.pts[k][0], it.pts[k + 1][1] - it.pts[k][1]) * 100) / 100);
-    h += `<p class="hint">Длины отрезков, мм: ${lens.map(v => `<span style="color:${Math.abs(v / 5 - Math.round(v / 5)) > 0.02 ? 'var(--red)' : 'inherit'}">${String(v).replace('.', ',')}</span>`).join(', ')}</p>`;
+    const offGrid = v => Math.abs(v / GRID - Math.round(v / GRID)) > TOL.boundary;
+    h += `<p class="hint">Длины отрезков, мм: ${lens.map(v => `<span class="${offGrid(v) ? 'bad' : ''}">${String(v).replace('.', ',')}</span>`).join(', ')}</p>`;
     h += `<div class="actions"><button class="btn danger" id="aDel" type="button">Удалить линию</button></div>`;
-    h += `<div class="help" style="margin-top:14px"><p>Тяните отрезок, чтобы сдвинуть его параллельно себе, или квадратик в изломе — чтобы переставить точку. Шаг 5 мм, с Shift — 1 мм.</p></div>`;
+    h += `<div class="help" style="margin-top:14px"><p>Тяните отрезок, чтобы сдвинуть его параллельно себе, или квадратик в изломе — чтобы переставить точку. Шаг ${GRID} мм, с Shift — ${FINE} мм.</p></div>`;
   } else if (it.type === 'label') {
     h += `<h3>Подпись ветви</h3><label class="field">Текст<input type="text" id="pLab" value="${esc(it.text)}"></label>`;
-    h += `<div class="actions"><button class="btn" id="aYN" type="button">Заменить на «${it.text === 'Да' ? 'Нет' : 'Да'}»</button><button class="btn danger" id="aDel" type="button">Удалить подпись</button></div>`;
+    h += `<div class="actions"><button class="btn" id="aYN" type="button">Заменить на «${it.text === TEXTS.yes ? TEXTS.no : TEXTS.yes}»</button><button class="btn danger" id="aDel" type="button">Удалить подпись</button></div>`;
   } else if (it.type === 'comment') {
     h += `<h3>Комментарий</h3><label class="field">Текст комментария<textarea id="pCmt" rows="4">${esc(it.text)}</textarea></label>`;
     h += `<p class="hint">Пояснения к обозначениям удобнее заполнять на вкладке «Обозначения» — комментарий соберётся сам.</p>`;
@@ -688,7 +742,7 @@ function renderSide() {
   on('aDel', 'click', () => { const m = ensureManual(); if (m) { pushUndo(); m.items = m.items.filter(i => i.id !== it.id && !(it.type === 'block' && i.owner === it.id)); sel = null; save(); renderBoard(); renderSide(); } });
   on('pArrow', 'change', e => { pushUndo(); const m = ensureManual(); const l = m.items.find(i => i.id === it.id); l.arrow = e.target.value; save(); renderBoard(); });
   on('pLab', 'input', e => { onceUndo(); const m = ensureManual(); const l = m.items.find(i => i.id === it.id); l.text = e.target.value; save(); renderBoard(); });
-  on('aYN', 'click', () => { pushUndo(); const m = ensureManual(); const l = m.items.find(i => i.id === it.id); l.text = l.text === 'Да' ? 'Нет' : 'Да'; save(); renderBoard(); renderSide(); });
+  on('aYN', 'click', () => { pushUndo(); const m = ensureManual(); const l = m.items.find(i => i.id === it.id); l.text = l.text === TEXTS.yes ? TEXTS.no : TEXTS.yes; save(); renderBoard(); renderSide(); });
   on('pCmt', 'input', e => { onceUndo(); setComment(e.target.value); });
   on('aDelC', 'click', () => { pushUndo(); edits().comment = ''; if (isManual()) { const m = G(); m.items = m.items.filter(i => i.type !== 'comment'); } else regen(S.active); sel = null; renderBoard(); renderSide(); save(); });
 }
@@ -701,16 +755,16 @@ function markupHelp() {
 }
 function renderDiagramProps(g) {
   const d = diagById(S.active);
-  const b = geomBounds(g, measureMarkup);
-  const checks = checkGeometry(g, b, lastOverflow.length, S.opts.maxH || 245);
+  const b = geomBounds(g, measureMarkup, gost);
+  const checks = checkGeometry(g, b, lastOverflow.length, S.opts.maxH, gost);
   let h = `<h3>${esc(d.title)}</h3>`;
   h += `<label class="field">Подпись под рисунком в отчёте<input type="text" id="pCap" value="${esc(captionOf(d))}"></label>`;
-  h += `<h4>Проверка по чек-листу</h4><ul class="check">${checks.map(c => `<li class="${c.ok ? '' : 'no'}">${esc(c.text)}</li>`).join('')}</ul>`;
+  h += `<h4>Проверка по ГОСТ 19.701-90</h4><ul class="check">${checks.map(c => `<li class="${c.ok ? '' : 'no'}"><span>${esc(c.text)} <small>${/^\d/.test(c.clause) ? 'п. ' : ''}${esc(c.clause)}</small></span></li>`).join('')}</ul>`;
   h += `<p class="hint" style="margin-top:8px">Вставляйте рисунок в отчёт без масштабирования: у PNG записано разрешение, поэтому Word покажет его в натуральную величину ${b.W} × ${b.H} мм.</p>`;
   h += `<h4>Как править</h4><div class="help">
     <p>Щёлкните по блоку — здесь появится его текст. Правки текста сохраняются и после перестроения схемы.</p>
-    <p>Перетаскивайте блоки, отрезки линий и подписи мышью: связанные линии следуют за блоком. Шаг 5 мм, с Shift — 1 мм. Стрелки на клавиатуре двигают выделенное.</p>
-    <p>Панель над листом добавляет элементы из презентации: начало и конец, процесс, условие, блоки цикла, перенос, подпись, линию.</p>
+    <p>Перетаскивайте блоки, отрезки линий и подписи мышью: связанные линии следуют за блоком. Шаг ${GRID} мм, с Shift — ${FINE} мм. Стрелки на клавиатуре двигают выделенное.</p>
+    <p>Панель над листом добавляет символы схемы программы: терминатор, процесс, данные, предопределённый процесс, решение, границы цикла, соединитель, а также подпись выхода и линию.</p>
     <p><span class="kbd">Del</span> удалить, <span class="kbd">Ctrl</span>+<span class="kbd">Z</span> отменить, <span class="kbd">Esc</span> снять выделение.</p></div>`;
   sideEl.innerHTML = h;
   const cap = sideEl.querySelector('#pCap');
@@ -743,7 +797,7 @@ function renderNames() {
     const lc = inp.dataset.lc; const e = (S.names[lc] = S.names[lc] || {});
     e[inp.dataset.f] = inp.value;
     if (!e.disp && !e.desc) delete S.names[lc];
-    clearTimeout(namesT); namesT = setTimeout(() => { rebuildKeepSide(); }, 350);
+    clearTimeout(namesT); namesT = setTimeout(rebuildKeepSide, TIMING.namesDelay);
   }));
 }
 function rebuildKeepSide() {
@@ -753,29 +807,32 @@ function rebuildKeepSide() {
 }
 
 // ---------- экспорт ----------
-let dlNs = null;
-const dlReady = (window.claude && typeof window.claude.use === 'function') ? window.claude.use('downloads').then(ns => { dlNs = ns; return ns; }).catch(() => null) : Promise.resolve(null);
+const isRaster = fmt => fmt !== 'svg';
+const canBeTransparent = fmt => EXPORT.transparent.includes(fmt);
+/** Параметры изображения с учётом ограничений формата. */
+function exportLook(E) {
+  const bg = canBeTransparent(E.fmt) ? E.bg : 'white';
+  return { background: bg === 'white', fill: bg === 'transparent' ? E.fill : 'white', bg };
+}
 function renderExport() {
   const g = G();
   if (!g) { sideEl.innerHTML = '<p class="help">Сначала постройте схему.</p>'; return; }
-  const E = S.exp; const b = geomBounds(g, measureMarkup);
-  const raster = E.fmt === 'png' || E.fmt === 'jpg' || E.fmt === 'webp' || E.fmt === 'pdf';
-  const canTransparent = E.fmt === 'png' || E.fmt === 'svg' || E.fmt === 'webp';
-  const bg = canTransparent ? E.bg : 'white';
-  const H = b.H + (E.caption ? CAPTION_H : 0);
+  const E = S.exp; const b = geomBounds(g, measureMarkup, gost);
+  const { bg } = exportLook(E);
+  const H = b.H + (E.caption ? M.caption.height : 0);
   const px = [Math.round(b.W / 25.4 * E.dpi), Math.round(H / 25.4 * E.dpi)];
   const seg = (name, val, opts) => `<div class="seg" data-k="${name}">${opts.map(([v, t, dis]) => `<button type="button" data-v="${v}" aria-pressed="${String(val) === String(v)}" ${dis ? 'disabled' : ''}>${t}</button>`).join('')}</div>`;
   let h = `<h3>Сохранить изображение</h3>`;
-  h += `<div class="exprow"><div>Формат</div>${seg('fmt', E.fmt, [['png', 'PNG'], ['svg', 'SVG'], ['jpg', 'JPEG'], ['webp', 'WebP'], ['pdf', 'PDF']])}</div>`;
-  h += `<div class="exprow"><div>Фон</div>${seg('bg', bg, [['white', 'Белый'], ['transparent', 'Прозрачный', !canTransparent]])}</div>`;
+  h += `<div class="exprow"><div>Формат</div>${seg('fmt', E.fmt, EXPORT.formats.map(f => [f, EXPORT.labels[f]]))}</div>`;
+  h += `<div class="exprow"><div>Фон</div>${seg('bg', bg, [['white', 'Белый'], ['transparent', 'Прозрачный', !canBeTransparent(E.fmt)]])}</div>`;
   if (bg === 'transparent') h += `<div class="exprow"><div>Заливка блоков на прозрачном фоне</div>${seg('fill', E.fill, [['white', 'Белая'], ['none', 'Без заливки']])}</div>`;
-  if (raster) h += `<div class="exprow"><div>Разрешение</div>${seg('dpi', E.dpi, [[150, '150 dpi'], [300, '300 dpi'], [600, '600 dpi']])}</div>`;
-  h += `<label class="setrow" style="justify-content:flex-start"><input type="checkbox" id="eCap" ${E.caption ? 'checked' : ''}> Добавить подпись «${esc(captionOf(diagById(S.active)).slice(0, 40))}…» под схемой</label>`;
-  h += `<div class="expinfo">Размер ${b.W} × ${H} мм${raster && E.fmt !== 'pdf' ? `, ${px[0]} × ${px[1]} пикселей` : ''}. ${E.fmt === 'svg' ? 'Векторный файл: текст остаётся текстом, шрифт Times New Roman.' : E.fmt === 'pdf' ? 'Страница PDF точно по размеру схемы.' : 'Разрешение записано в файл — Word вставит рисунок в масштабе 1:1.'}</div>`;
-  h += `<div class="actions"><button class="btn primary" id="eSave" type="button">Скачать ${E.fmt.toUpperCase()}</button>`;
+  if (isRaster(E.fmt)) h += `<div class="exprow"><div>Разрешение</div>${seg('dpi', E.dpi, EXPORT.dpi.map(d => [d, d + ' dpi']))}</div>`;
+  h += `<label class="setrow start"><input type="checkbox" id="eCap" ${E.caption ? 'checked' : ''}> Добавить подпись «${esc(captionOf(diagById(S.active)).slice(0, EXPORT.captionPreview))}…» под схемой</label>`;
+  h += `<div class="expinfo">Размер ${b.W} × ${H} мм${isRaster(E.fmt) && E.fmt !== 'pdf' ? `, ${px[0]} × ${px[1]} пикселей` : ''}. ${E.fmt === 'svg' ? 'Векторный файл: текст остаётся текстом, шрифт Times New Roman.' : E.fmt === 'pdf' ? 'Страница PDF точно по размеру схемы.' : 'Разрешение записано в файл — Word вставит рисунок в масштабе 1:1.'}</div>`;
+  h += `<div class="actions"><button class="btn primary" id="eSave" type="button">Скачать ${EXPORT.labels[E.fmt]}</button>`;
   h += `<button class="btn" id="eAll" type="button">Скачать все схемы одним архивом ZIP</button>`;
   h += `<button class="btn" id="eCopy" type="button">Копировать PNG в буфер обмена</button></div>`;
-  h += `<p class="hint" style="margin-top:12px">На экспортируемом рисунке нет сетки, выделения и подсказок — только сама схема.</p>`;
+  h += `<p class="hint gap">На экспортируемом рисунке нет сетки, выделения и подсказок — только сама схема.</p>`;
   sideEl.innerHTML = h;
   sideEl.querySelectorAll('.seg[data-k] button').forEach(btn => btn.onclick = () => {
     const k = btn.parentElement.dataset.k; let v = btn.dataset.v; if (k === 'dpi') v = +v;
@@ -786,82 +843,93 @@ function renderExport() {
   sideEl.querySelector('#eAll').onclick = () => exportAll();
   sideEl.querySelector('#eCopy').onclick = () => copyPng();
 }
-function safeName(s) { return s.replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_').replace(/–/g, '-').slice(0, 120); }
+function safeName(s) { return s.replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_').replace(/–/g, '-').slice(0, EXPORT.fileNameLength); }
+
+/** Библиотеки экспорта подгружаются только при первом обращении. */
+const vendorLoads = new Map();
+function loadVendor(name) {
+  const lib = VENDOR[name];
+  if (window[lib.global]) return Promise.resolve(window[lib.global]);
+  if (!vendorLoads.has(name)) {
+    vendorLoads.set(name, new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = lib.src;
+      el.onload = () => (window[lib.global] ? resolve(window[lib.global]) : reject(new Error(`Модуль ${lib.title} не загрузился`)));
+      el.onerror = () => { vendorLoads.delete(name); reject(new Error(`Не удалось загрузить модуль ${lib.title} — проверьте соединение`)); };
+      document.head.append(el);
+    }));
+  }
+  return vendorLoads.get(name);
+}
+function rasterCanvas(g, b, E, caption) {
+  const look = exportLook(E);
+  return sceneToCanvas(buildScene(g, gost, text, { fill: look.fill }), b, gost, text, { dpi: E.dpi || EXPORT.defaultDpi, background: look.background, caption });
+}
 async function makeFile(d, g, E) {
-  const b = geomBounds(g, measureMarkup);
-  const canTransparent = E.fmt === 'png' || E.fmt === 'svg' || E.fmt === 'webp';
-  const bg = canTransparent ? E.bg : 'white';
-  const fill = bg === 'transparent' ? E.fill : 'white';
+  const b = geomBounds(g, measureMarkup, gost);
+  const look = exportLook(E);
   const caption = E.caption ? captionOf(d) : null;
   const base = safeName(captionOf(d));
-  if (E.fmt === 'svg') return { name: base + '.svg', blob: new Blob([exportSVGString(g, b, { bg, fill, caption })], { type: 'image/svg+xml' }) };
-  const dpi = E.dpi || 300;
-  const cv = drawCanvas(g, b, { dpi, bg, fill, caption });
+  if (E.fmt === 'svg') {
+    const svg = sceneToSvgFile(buildScene(g, gost, text, { fill: look.fill }), b, gost, text, { background: look.background, caption });
+    return { name: base + '.svg', blob: new Blob([svg], { type: 'image/svg+xml' }) };
+  }
+  const dpi = E.dpi || EXPORT.defaultDpi;
+  const cv = rasterCanvas(g, b, E, caption);
   if (E.fmt === 'png') { const bl = await canvasBlob(cv, 'image/png'); return { name: base + '.png', blob: new Blob([pngWithDpi(await bl.arrayBuffer(), dpi)], { type: 'image/png' }) }; }
-  if (E.fmt === 'jpg') { const bl = await canvasBlob(cv, 'image/jpeg', 0.95); return { name: base + '.jpg', blob: new Blob([jpegWithDpi(await bl.arrayBuffer(), dpi)], { type: 'image/jpeg' }) }; }
-  if (E.fmt === 'webp') { const bl = await canvasBlob(cv, 'image/webp', 0.97); return { name: base + '.webp', blob: bl }; }
+  if (E.fmt === 'jpg') { const bl = await canvasBlob(cv, 'image/jpeg', EXPORT.jpegQuality); return { name: base + '.jpg', blob: new Blob([jpegWithDpi(await bl.arrayBuffer(), dpi)], { type: 'image/jpeg' }) }; }
+  if (E.fmt === 'webp') return { name: base + '.webp', blob: await canvasBlob(cv, 'image/webp', EXPORT.webpQuality) };
   if (E.fmt === 'pdf') {
-    if (!window.jspdf) throw new Error('Модуль PDF ещё не загрузился — попробуйте через пару секунд.');
-    const H = b.H + (caption ? CAPTION_H : 0);
-    const doc = new window.jspdf.jsPDF({ unit: 'mm', format: [b.W, H], orientation: b.W > H ? 'l' : 'p', compress: true });
+    const { jsPDF } = await loadVendor('pdf');
+    const H = b.H + (caption ? M.caption.height : 0);
+    const doc = new jsPDF({ unit: 'mm', format: [b.W, H], orientation: b.W > H ? 'l' : 'p', compress: true });
     doc.addImage(cv.toDataURL('image/png'), 'PNG', 0, 0, b.W, H, undefined, 'FAST');
     return { name: base + '.pdf', blob: doc.output('blob') };
   }
+  throw new Error('Неизвестный формат файла');
 }
-async function saveBlob(name, blob) {
-  const ns = dlNs || await Promise.race([dlReady, new Promise(r => setTimeout(() => r(null), 1500))]);
-  if (ns) {
-    try { const r = await ns.save({ filename: name, data: blob }); if (!r || r.status !== 'delivered') toast('Файл сохранён: ' + name); }
-    catch (e) {
-      const c = e && e.code;
-      if (c === 'declined') toast('Сохранение отменено');
-      else if (c === 'rate_limited') toast('Окно сохранения уже открыто — подтвердите или закройте его');
-      else if (c === 'too_large') toast('Файл слишком большой — уменьшите разрешение');
-      else if (c === 'rejected_extension' || c === 'extension_not_enabled') toast('Этот формат здесь сохранить нельзя — выберите PNG');
-      else toast('Сохранение файлов в этом окне недоступно');
-    }
-    return;
-  }
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
-  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+function saveBlob(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.append(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, TIMING.revokeUrl);
   toast('Файл сохранён: ' + name);
 }
 async function exportCurrent() {
-  try { const d = diagById(S.active); const f = await makeFile(d, G(), S.exp); await saveBlob(f.name, f.blob); }
+  try { const d = diagById(S.active); const f = await makeFile(d, G(), S.exp); saveBlob(f.name, f.blob); }
   catch (e) { toast(e.message || 'Не удалось сохранить файл'); }
 }
 async function exportAll() {
   try {
-    if (!window.JSZip) throw new Error('Модуль ZIP ещё не загрузился — попробуйте через пару секунд.');
-    const zip = new window.JSZip();
+    const JSZip = await loadVendor('zip');
+    const zip = new JSZip();
     for (const d of visibleDiags()) {
-      const g = S.manual[d.id] || geoms[d.id]; if (!g) continue; renumber(g);
+      const g = S.manual[d.id] || geoms[d.id]; if (!g) continue; renumber(g, gost);
       const f = await makeFile(d, g, S.exp); zip.file(f.name, f.blob);
     }
-    const blob = await zip.generateAsync({ type: 'blob' });
-    await saveBlob('Схемы_программы.zip', blob);
+    saveBlob(EXPORT.archiveName, await zip.generateAsync({ type: 'blob' }));
   } catch (e) { toast(e.message || 'Не удалось собрать архив'); }
 }
 async function copyPng() {
   try {
-    const g = G(); const b = geomBounds(g, measureMarkup);
-    const bg = S.exp.bg === 'transparent' ? 'transparent' : 'white';
-    const cv = drawCanvas(g, b, { dpi: S.exp.dpi || 300, bg, fill: bg === 'transparent' ? S.exp.fill : 'white', caption: S.exp.caption ? captionOf(diagById(S.active)) : null });
-    const blob = await canvasBlob(cv, 'image/png');
+    const g = G(); const b = geomBounds(g, measureMarkup, gost);
+    const E = { ...S.exp, fmt: 'png' };
+    const blob = await canvasBlob(rasterCanvas(g, b, E, S.exp.caption ? captionOf(diagById(S.active)) : null), 'image/png');
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
     toast('Схема скопирована — вставьте её в документ');
-  } catch (e) { toast('Браузер не разрешил доступ к буферу обмена — скачайте PNG'); }
+  } catch { toast('Браузер не разрешил доступ к буферу обмена — скачайте PNG'); }
 }
 
 // ---------- масштаб и прочее ----------
-$('#zoomIn').onclick = () => { S.ui.zoom = Math.min(4, (S.ui.zoom || zoom) * 1.2); renderBoard(); };
-$('#zoomOut').onclick = () => { S.ui.zoom = Math.max(0.25, (S.ui.zoom || zoom) / 1.2); renderBoard(); };
+const clampZoom = z => Math.max(ZOOM.min, Math.min(ZOOM.max, z));
+$('#zoomIn').onclick = () => { S.ui.zoom = clampZoom((S.ui.zoom || zoom) * ZOOM.step); renderBoard(); };
+$('#zoomOut').onclick = () => { S.ui.zoom = clampZoom((S.ui.zoom || zoom) / ZOOM.step); renderBoard(); };
 $('#zoomFit').onclick = () => { S.ui.zoom = null; renderBoard(); };
 $('#zoom1').onclick = () => { S.ui.zoom = 1; renderBoard(); };
 $('#gridBtn').onclick = () => { S.ui.grid = !S.ui.grid; $('#gridBtn').setAttribute('aria-pressed', String(S.ui.grid)); renderBoard(); save(); };
 $('#undoBtn').onclick = undo; $('#redoBtn').onclick = redo;
-boardWrap.addEventListener('wheel', e => { if (!(e.ctrlKey || e.metaKey)) return; e.preventDefault(); S.ui.zoom = Math.max(0.25, Math.min(4, (S.ui.zoom || zoom) * (e.deltaY < 0 ? 1.1 : 1 / 1.1))); renderBoard(); }, { passive: false });
-let rsT = null; window.addEventListener('resize', () => { clearTimeout(rsT); rsT = setTimeout(() => { if (S.ui.zoom == null) renderBoard(); }, 150); });
+boardWrap.addEventListener('wheel', e => { if (!(e.ctrlKey || e.metaKey)) return; e.preventDefault(); S.ui.zoom = clampZoom((S.ui.zoom || zoom) * (e.deltaY < 0 ? ZOOM.wheelStep : 1 / ZOOM.wheelStep)); scheduleBoard(); }, { passive: false });
+let rsT = null; window.addEventListener('resize', () => { clearTimeout(rsT); rsT = setTimeout(() => { if (S.ui.zoom == null) renderBoard(); }, TIMING.resizeDelay); });
 
 $('#buildBtn').onclick = () => {
   const manualIds = Object.keys(S.manual);
@@ -887,26 +955,39 @@ $('#fileIn').onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   const buf = await f.arrayBuffer();
   let txt = new TextDecoder('utf-8', { fatal: false }).decode(buf);
-  if (txt.includes('\uFFFD')) { try { txt = new TextDecoder('windows-1251').decode(buf); } catch (er) { /* оставить utf-8 */ } }
+  if (txt.includes('\uFFFD')) { try { txt = new TextDecoder('windows-1251').decode(buf); } catch { /* кодировка не поддерживается — оставить utf-8 */ } }
   S.code = txt; S.exId = ''; S.edits = {}; S.ifopts = {}; S.manual = {}; S.active = null; sel = null;
   codeEl.value = txt; refreshEditor(); rebuild(); e.target.value = ''; toast('Открыт файл ' + f.name);
 };
 // настройки
+const SYMBOL_OPTION_TEXT = {
+  ioSymbol: { process: '«Процесс» (как в методичке)', data: '«Данные» (параллелограмм)' },
+  callSymbol: { predefined: '«Предопределённый процесс»', process: '«Процесс»' },
+  caseStyle: { multi: 'Одно «Решение» с несколькими выходами', cascade: 'Цепочка «Решений» Да/Нет' },
+};
+const SYMBOL_OPTION_VALUES = { ioSymbol: IO_SYMBOLS, callSymbol: CALL_SYMBOLS, caseStyle: CASE_STYLES };
+function applyOptions(patch) { S.opts = normalizeOptions({ ...S.opts, ...patch }, gost); renderSettings(); rebuild(); }
 function renderSettings() {
-  document.querySelectorAll('#setMerge button').forEach(b => { b.setAttribute('aria-pressed', String(+b.dataset.v === S.opts.mergeN)); b.onclick = () => { S.opts.mergeN = +b.dataset.v; renderSettings(); rebuild(); }; });
-  const c = $('#setCollapse'); c.checked = S.opts.collapseIO !== false; c.onchange = () => { S.opts.collapseIO = c.checked; rebuild(); };
-  const m = $('#setMaxH'); m.value = S.opts.maxH; m.onchange = () => { const v = Math.max(120, Math.min(400, Math.round((+m.value || 245) / 5) * 5)); S.opts.maxH = v; m.value = v; rebuild(); };
-  const a = $('#setAuto'); a.checked = !!S.opts.autoBuild; a.onchange = () => { S.opts.autoBuild = a.checked; save(); };
+  document.querySelectorAll('#setMerge button').forEach(b => { b.hidden = +b.dataset.v < MERGE_RANGE.min || +b.dataset.v > MERGE_RANGE.max; b.setAttribute('aria-pressed', String(+b.dataset.v === S.opts.mergeN)); b.onclick = () => applyOptions({ mergeN: +b.dataset.v }); });
+  const c = $('#setCollapse'); c.checked = S.opts.collapseIO; c.onchange = () => applyOptions({ collapseIO: c.checked });
+  const m = $('#setMaxH'); m.min = COLUMN_HEIGHT_RANGE.min; m.max = COLUMN_HEIGHT_RANGE.max; m.step = GRID; m.value = S.opts.maxH; m.onchange = () => applyOptions({ maxH: +m.value });
+  const a = $('#setAuto'); a.checked = S.opts.autoBuild; a.onchange = () => { S.opts.autoBuild = a.checked; save(); };
+  for (const [key, values] of Object.entries(SYMBOL_OPTION_VALUES)) {
+    const el = $('#set-' + key);
+    el.innerHTML = values.map(v => `<option value="${v}">${esc(SYMBOL_OPTION_TEXT[key][v])}</option>`).join('');
+    el.value = S.opts[key];
+    el.onchange = () => applyOptions({ [key]: el.value });
+  }
 }
 
 // ---------- запуск ----------
 const had = load();
-if (!had || !S.code) { const ex = EXAMPLES[0]; S.code = ex.code; S.exId = ex.id; S.names = clone(ex.names); }
+if (!had || !S.code) { const ex = EXAMPLES[0]; S.code = ex.code; S.exId = ex.id; S.names = clone(ex.names || {}); }
 codeEl.value = S.code; refreshEditor(); renderSettings(); updUndo();
 $('#gridBtn').setAttribute('aria-pressed', String(S.ui.grid));
 rebuild();
 const fontsDone = () => { resetMeasureCache(); rebuild(); };
 if (document.fonts && document.fonts.load) {
-  Promise.all([document.fonts.load('12px Tinos'), document.fonts.load('12px "Times New Roman"'), document.fonts.load('13px "PT Mono"')]).then(() => document.fonts.ready).then(fontsDone).catch(fontsDone);
+  const probes = M.font.family.map(f => document.fonts.load(`12px "${f}"`));
+  Promise.all(probes).then(() => document.fonts.ready).then(fontsDone).catch(fontsDone);
 }
-})();
