@@ -1,5 +1,8 @@
-// ===================== ЛЕКСЕР И ПАРСЕР PASCAL =====================
-const RESERVED = new Set(('and array as asm begin case class const constructor destructor div do downto else end except exports ' +
+/**
+ * Лексер и синтаксический анализатор Pascal / Object Pascal.
+ * Модуль не зависит от DOM и от остальных частей движка.
+ */
+export const RESERVED = new Set(('and array as asm begin case class const constructor destructor div do downto else end except exports ' +
   'finalization finally for function goto if implementation in inherited initialization interface is label library mod nil not ' +
   'object of or packed procedure program raise record repeat resourcestring set shl shr then threadvar to try type unit until uses ' +
   'var while with xor dispinterface').split(' '));
@@ -7,7 +10,7 @@ const DIRECTIVES = new Set(('overload override virtual abstract reintroduce stat
   'forward external export assembler message dynamic deprecated platform experimental varargs local nostackframe public alias ' +
   'final unimplemented winapi far near noreturn iocheck hardfloat interrupt').split(' '));
 
-function lex(src) {
+export function lex(src) {
   const toks = []; let i = 0, line = 1; const n = src.length;
   const idStart = c => /[A-Za-z_\u00C0-\uFFFF]/.test(c);
   const idChar = c => /[A-Za-z0-9_\u00C0-\uFFFF]/.test(c);
@@ -53,7 +56,7 @@ function lex(src) {
       }
       toks.push({ t: 'str', v: src.slice(i, j), val, lc: '', line: ln, s: s0, e: j }); i = j; continue;
     }
-    const two = src.substr(i, 2);
+    const two = src.slice(i, i + 2);
     if ([':=', '+=', '-=', '*=', '/=', '<=', '>=', '<>', '..', '**', '><'].includes(two)) {
       toks.push({ t: 'sym', v: two, lc: two, line: ln, s: s0, e: i + 2 }); i += 2; continue;
     }
@@ -63,7 +66,7 @@ function lex(src) {
   return toks;
 }
 
-function parsePascal(src) {
+export function parsePascal(src) {
   const toks = lex(src); let p = 0;
   const EOF = toks[toks.length - 1];
   const errors = [];
