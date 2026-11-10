@@ -133,9 +133,16 @@ export function analyzeGeometry(G, gost = GOST) {
   }
 
   // п. 3.4.1 — парные соединители с одним уникальным обозначением
-  const connCount = new Map();
-  for (const b of blocks) if (b.shape === 'conn') connCount.set(b.text, (connCount.get(b.text) || 0) + 1);
-  for (const [text, count] of connCount) if (count !== 2) res.connectorPairs.push({ text, count });
+  // вход в поток (из соединителя выходит линия) — ровно один; обрывов линии на него — хотя бы один
+  const conns = new Map();
+  for (const b of blocks) {
+    if (b.shape !== 'conn') continue;
+    const c = conns.get(b.text) || { entries: 0, exits: 0 };
+    const leaves = lines.some((l) => sideAt(sym, b, l.pts[0]));
+    if (leaves) c.entries++; else c.exits++;
+    conns.set(b.text, c);
+  }
+  for (const [text, c] of conns) if (c.entries !== 1 || c.exits < 1) res.connectorPairs.push({ text, ...c });
 
   // п. 3.2.2.6 — обе части «Границы цикла» имеют один идентификатор, у разных циклов он разный
   const loopId = (b) => String(b.text).split('\n')[0];

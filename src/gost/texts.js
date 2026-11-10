@@ -18,6 +18,7 @@ export const TEXTS = Object.freeze({
   errorOutput: ['Вывод сообщения', 'об ошибке'],
   messageOutput: 'Вывод сообщения',
   jumpTo: 'Переход к',
+  asString: 'строка',
   newAction: 'Новое действие',
 });
 

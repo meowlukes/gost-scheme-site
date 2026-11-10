@@ -22,6 +22,10 @@ import { negate } from './transform.js';
 
 /** Допуск сравнения координат, мм. */
 const EPS = 0.01;
+/** Сколько раз подряд можно выносить ветви одной схемы (защита от зацикливания). */
+const MAX_OUTLINES = 200;
+/** Конструкции, ветвь которых можно вынести через соединители. */
+const OUTLINABLE = new Set(['if', 'casc', 'while', 'repeat']);
 /** Наименьшая доля колонки, которую нужно заполнить, прежде чем искать место переноса вне цикла. */
 const MIN_COLUMN_FILL = 0.4;
 
@@ -42,9 +46,9 @@ function eachSequence(item, visit) {
  * Построитель фрагментов: каждый оператор превращается во фрагмент с собственной системой
  * координат (ось потока — x = 0, верх — y = 0), фрагменты затем складываются в колонки.
  */
-function makeLayout(diag, env, gost, opts) {
+function makeLayout(diag, env, gost, opts, labelLetters) {
   const { metrics: M, symbols: SYM, texts: T } = gost;
-  const { hw, hh, h: H } = M.symbol;
+  const { hw, hh, h: H, connectorD: CD } = M.symbol;
   const FL = M.flow;
   const G = FL.gap;
   const LB = M.label;
@@ -106,8 +110,31 @@ function makeLayout(diag, env, gost, opts) {
     return out;
   }
   function pointFrag() { const f = frag(); f.top = f.bot = 'point'; f.L = f.R = 0; return f; }
-  function layItem(it) {
+  /**
+   * goto — соединитель, на котором линия обрывается; метка — парный соединитель слева от оси,
+   * из которого линия входит в поток (п. 3.4.1). Обозначение у пары одно.
+   */
+  function gotoFrag(it) {
+    const f = frag();
+    f.h = snapUp(CD); f.dead = true; f.first = { shape: 'conn' };
+    f.els.push({ k: 'b', shape: 'conn', x: 0, y: CD / 2, text: labelLetters.get(it.label), key: it.key });
+    return f;
+  }
+  function labelFrag(it, afterDead) {
+    const f = pointFrag();
+    // высота участка и точка примыкания — по сетке, чтобы отрезки линий оставались кратными модулю
+    const yJoin = snapUp(CD / 2), xc = -(hw - CD / 2), h = snapUp(yJoin + CD / 2);
+    f.h = h; f.L = hw; f.first = { shape: 'point' };
+    f.els.push({ k: 'b', shape: 'conn', x: xc, y: yJoin, text: labelLetters.get(it.label), key: it.key });
+    f.els.push(LN([xc + CD / 2, yJoin], [0, yJoin]));
+    // сверху поток приходит, только если предыдущий оператор не закончился переходом
+    f.els.push(afterDead ? LN([0, yJoin], [0, h]) : LN([0, 0], [0, h]));
+    return f;
+  }
+  function layItem(it, afterDead = false) {
     switch (it.t) {
+      case 'goto': return gotoFrag(it);
+      case 'label': return labelFrag(it, afterDead);
       case 'blk': return blockFrag(it);
       case 'slot': { const f = pointFrag(); f.slots.push({ name: it.name, x: 0, y: 0 }); return f; }
       case 'spacer': { const f = pointFrag(); f.h = H; f.els.push(LN([0, 0], [0, H])); f.spacer = true; return f; }
@@ -126,8 +153,9 @@ function makeLayout(diag, env, gost, opts) {
     const ex = expand(content);
     let y = 0, prev = null;
     for (const it of ex) {
-      const c = layItem(it);
-      if (prev) { f.els.push(LN([0, y], [0, y + G])); y += G; }
+      const c = layItem(it, !!prev && prev.dead);
+      // после перехода (goto, exit) линии вниз нет: дальше поток приходит только через метку
+      if (prev) { if (!prev.dead) f.els.push(LN([0, y], [0, y + G])); y += G; }
       else { f.top = c.top; f.first = c.first; }
       put(f, c, 0, y); y += c.h; prev = c;
       f.L = Math.max(f.L, c.L); f.R = Math.max(f.R, c.R);
@@ -402,7 +430,7 @@ function makeLayout(diag, env, gost, opts) {
     f.L = Math.max(hw, Bd.L); f.R = xR;
     return f;
   }
-  return { expand, layItem, measure, labelW, shapeOf };
+  return { expand, layItem, fSeq, measure, labelW, shapeOf };
 }
 
 // ---------- правки пользователя в логической модели ----------
@@ -472,7 +500,10 @@ export function layoutDiagram(diag, env) {
   const edits = (env.edits && env.edits[diag.id]) || {};
   const ir = applyEdits(diag.ir, edits, T);
   const nLoops = nameLoops(ir);
-  const LY = makeLayout(diag, env, gost, opts);
+  // обозначения: циклы, затем метки goto, затем соединители переноса — одна последовательность
+  const labelLetters = new Map();
+  (function scan(seq) { for (const it of seq) { if (it.t === 'label' && !labelLetters.has(it.label)) labelLetters.set(it.label, letterId(nLoops + labelLetters.size)); eachSequence(it, scan); } })(ir);
+  const LY = makeLayout(diag, env, gost, opts, labelLetters);
   const targets = collectTargets(ir);
   const needErr = targets.has('err'), needEnd = needErr || targets.has('end');
 
@@ -484,10 +515,21 @@ export function layoutDiagram(diag, env) {
     if (!(last && last.t === 'blk' && last.shape !== 'term')) items.push({ t: 'spacer' });
     errRowIdx = items.length - 1;
   }
+  const errRowItem = needErr ? items[errRowIdx] : null;
   if (needEnd) items.push({ t: 'slot', name: 'end' });
-  items.push(term('stop', T.end));
-  const frags = items.map((it) => LY.layItem(it));
-  frags.forEach((f, i) => { f.idx = i; });
+  items.push({ ...term('stop', T.end), last: true });
+  /** Идёт ли поток из фрагмента в следующий за ним (после «Конец» и после перехода — нет). */
+  const flowsOn = (f) => !f.dead && !f.last;
+  const layAll = () => {
+    const list = [];
+    for (const it of items) {
+      const prev = list[list.length - 1];
+      const f = LY.layItem(it, !!prev && !flowsOn(prev));
+      f.last = !!it.last; f.idx = list.length;
+      list.push(f);
+    }
+    return list;
+  };
 
   // --- деление на колонки (перенос через соединители, пп. 3.4.1 и 4.2.5) ---
   const connR = connectorD / 2;
@@ -496,10 +538,58 @@ export function layoutDiagram(diag, env) {
   const yColTop = M.page.margin + connectorD + FL.connectorLead; // верх колонки-продолжения
   const connReserve = FL.connectorLead + connectorD;           // место под выходной соединитель
   const maxBottom = opts.maxH - M.page.margin;
+
+  // --- вынос длинных ветвей ---
+  // Ветвление или цикл выше колонки нельзя разорвать посередине. Его самая длинная ветвь
+  // заменяется соединителем и переносится отдельным участком после «Конец»; возврат —
+  // вторым соединителем (п. 4.2.5: соединители вместо слишком длинных линий).
+  const colRoom = maxBottom - yColTop - connReserve;
+  const hasJump = (seq) => seq.some((it) => { if (it.t === 'jump') return true; let found = false; eachSequence(it, (b) => { if (hasJump(b)) found = true; }); return found; });
+  const newLabel = (name) => { labelLetters.set(name, letterId(nLoops + labelLetters.size)); return name; };
+  let outlined = 0;
+  function outline(k) {
+    const it = items[k];
+    const bodies = it.t === 'if' ? [it.yes, it.no] : it.t === 'casc' ? it.arms.map((a) => a.body).concat(it.els ? [it.els] : []) : [it.body];
+    // ветвь с досрочным выходом (exit, break, continue) не выносится: её переходы привязаны к месту
+    const cands = bodies
+      .filter((b) => b.length && !(b.length === 1 && b[0].t === 'goto') && !hasJump(b))
+      .map((b) => ({ b, h: LY.fSeq(b).h }))
+      .filter((c) => c.h > H + 2 * G)
+      .sort((a, b) => b.h - a.h);
+    if (!cands.length) return false;
+    const body = cands[0].b;
+    const n = ++outlined;
+    const old = body.splice(0, body.length);
+    const endsWithJump = old[old.length - 1].t === 'goto';
+    const enter = newLabel('@in' + n);
+    body.push({ t: 'goto', key: `${it.key}:out${n}`, label: enter });
+    const section = [{ t: 'label', key: `${it.key}:in${n}`, label: enter }, ...LY.expand(old)];
+    if (!endsWithJump) {
+      const back = newLabel('@back' + n);
+      section.push({ t: 'goto', key: `${it.key}:ret${n}`, label: back });
+      const returnPoint = { t: 'label', key: `${it.key}:back${n}`, label: back };
+      if (it.t === 'while') items.splice(k, 0, returnPoint);        // к проверке условия
+      else if (it.t === 'repeat') body.push(returnPoint);           // к условию после тела
+      else items.splice(k + 1, 0, returnPoint);                     // к оператору после ветвления
+    }
+    items.push(...section);
+    return true;
+  }
+  let frags = layAll();
+  const atomic = new Set();
+  for (let guard = 0; opts.splitLongBranches && guard < MAX_OUTLINES; guard++) {
+    const k = frags.findIndex((f, i) => f.h > colRoom && OUTLINABLE.has(items[i].t) && !atomic.has(items[i]));
+    if (k < 0) break;
+    if (outline(k)) frags = layAll(); else atomic.add(items[k]);
+  }
+  if (needErr) errRowIdx = items.indexOf(errRowItem);
+
   const cols = [];
   // глубина вложенности циклов перед элементом — переносим по возможности вне циклов
   const depth = [];
   { let d = 0; items.forEach((it, k) => { if (it.shape === 'lend') d--; depth[k] = d; if (it.shape === 'lbeg') d++; }); }
+  const keepWithPrev = new Set();
+  items.forEach((it, k) => { if ((it.t === 'slot' && it.name === 'end') || it.last) keepWithPrev.add(k); });
   const restNeed = (from) => { let s = 0; for (let k = from; k < frags.length; k++) s += frags[k].h + (k > from ? G : 0); return s; };
   for (let i = 0; i < frags.length;) {
     const y = cols.length ? yColTop : yTop;
@@ -516,6 +606,8 @@ export function layoutDiagram(diag, env) {
       const lo = Math.max(i + 1, i + Math.ceil((last - i) * MIN_COLUMN_FILL));
       for (let k = last; k >= lo; k--) if (depth[k] < depth[best]) best = k;
     }
+    // строка блока ошибки, точка «Конец» и терминатор не разносятся по разным колонкам
+    while (keepWithPrev.has(best) && best > i + 1) best--;
     cols.push(frags.slice(i, best)); i = best;
   }
   // колонка каждой точки слияния, линии выхода и строки блока ошибки
@@ -524,7 +616,7 @@ export function layoutDiagram(diag, env) {
   if (needErr) tcolOf.err = frags[errRowIdx].col;
 
   // --- обозначения: сначала циклы, затем соединители; общая последовательность ⇒ уникальны ---
-  let letterN = nLoops;
+  let letterN = nLoops + labelLetters.size;
   const nextLetter = () => letterId(letterN++);
 
   const els = [];
@@ -568,9 +660,11 @@ export function layoutDiagram(diag, env) {
       : snapUp(Math.max(prevRight.blocks + FL.columnGapSymbols, prevRight.lines + FL.columnGapLines) + Lmax);
     let y = c === 0 ? yTop : yColTop;
     const info = { X, top: y, jumps: [] };
-    if (c > 0) { connector(X, yConnTop, colInfo[c - 1].letter, 'conn' + c + 't', c); push(LN([X, yConnTop + connR], [X, yColTop]), c); }
+    // колонки связаны соединителями, только если поток действительно переходит из одной в другую
+    const linkedIn = c > 0 && colInfo[c - 1].linked;
+    if (linkedIn) { connector(X, yConnTop, colInfo[c - 1].letter, 'conn' + c + 't', c); push(LN([X, yConnTop + connR], [X, yColTop]), c); }
     cf.forEach((f, k) => {
-      if (k > 0) { push(LN([X, y], [X, y + G]), c); y += G; }
+      if (k > 0) { if (flowsOn(cf[k - 1])) push(LN([X, y], [X, y + G]), c); y += G; }
       f.absY = y; f.absX = X;
       for (const e of f.els) push(moveEl(e, X, y), c);
       for (const j of f.jumps) info.jumps.push({ ...j, x: j.x + X, y: j.y + y });
@@ -579,9 +673,11 @@ export function layoutDiagram(diag, env) {
       y += f.h;
     });
     info.bottom = y;
-    if (c < cols.length - 1) {
+    info.connY = y + FL.connectorLead + connR;
+    info.linked = c < cols.length - 1 && flowsOn(cf[cf.length - 1]);
+    if (info.linked) {
       push(LN([X, y], [X, y + FL.connectorLead]), c);
-      info.letter = nextLetter(); info.connY = y + FL.connectorLead + connR;
+      info.letter = nextLetter();
       connector(X, info.connY, info.letter, 'conn' + c + 'b', c);
     }
     colInfo.push(info);
