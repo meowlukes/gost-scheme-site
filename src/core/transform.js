@@ -513,7 +513,22 @@ export function transformRoutine(prog, R, body, env) {
     if (op === ':=' && isInput(rhs)) return [ioBlk('in', [lhs], key)];
     let r = rhs;
     if (op !== ':=') r = { e: 'bin', op: op[0], l: lhs, r: rhs };
-    return [proc(key, P.pr(lhs).s + ' = ' + wrap(P.pr(r), PR.ADD))];
+    const text = P.pr(lhs).s + ' = ' + wrap(P.pr(r), PR.ADD);
+    // присваивание результата своей функции — тоже вызов подпрограммы: «Предопределённый процесс» (п. 3.2.2.1)
+    if (opts.callSymbol !== 'process' && callsOwnFunction(rhs)) return [mkBlk('call', key, [text])];
+    return [proc(key, text)];
+  }
+  /**
+   * Вызывается ли в выражении функция, описанная в этой программе: f(x) или f без скобок.
+   * Имя функции внутри её собственного тела без скобок — это её результат, а не вызов.
+   */
+  function callsOwnFunction(e) {
+    if (!e || typeof e !== 'object') return false;
+    if (Array.isArray(e)) return e.some(callsOwnFunction);
+    const isOwnFunc = (name) => { const r = ctx.own.get(name.toLowerCase()); return !!(r && r.isFunc); };
+    if (e.e === 'call' && e.f && e.f.e === 'id' && isOwnFunc(e.f.name)) return true;
+    if (e.e === 'id' && isOwnFunc(e.name) && !ctx.isVar(e.name.toLowerCase()) && !(ctx.fn && ctx.fn.short.toLowerCase() === e.name.toLowerCase())) return true;
+    return Object.values(e).some((v) => v && typeof v === 'object' && callsOwnFunction(v));
   }
   function trCall(st, key) {
     const c = callInfo(st.e); const lc = c.lc; const ch = c.chain.join('.');

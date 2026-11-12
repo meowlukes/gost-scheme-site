@@ -82,7 +82,7 @@ export function parsePascal(src) {
   const expS = v => { if (!acc(v)) throw perr(`ожидалось «${v}», найдено «${T().v}»`); };
   const expK = lc => { if (!accK(lc)) throw perr(`ожидалось «${lc}», найдено «${T().v}»`); };
 
-  const prog = { routines: [], mains: [], classes: {}, types: {}, globals: new Map(), errors, src };
+  const prog = { header: null, routines: [], mains: [], classes: {}, types: {}, globals: new Map(), errors, src };
   const globalScope = { vars: prog.globals, routines: [], routine: null };
 
   function skipTo(v) { let d = 0; while (T().t !== 'eof') { if (isS('(') || isS('[')) d++; else if (isS(')') || isS(']')) d--; else if (d <= 0 && isS(v)) return; p++; } }
@@ -402,8 +402,8 @@ export function parsePascal(src) {
   let mode = 'impl';
   for (;;) {
     if (T().t === 'eof') break;
-    if (isK('program') || isK('library')) { p++; next(); if (isS('(')) skipParens(); acc(';'); mode = 'impl'; continue; }
-    if (isK('unit')) { p++; next(); while (acc('.')) next(); while (!isS(';') && T().t !== 'eof') p++; acc(';'); mode = 'intf'; continue; }
+    if (isK('program') || isK('library')) { const kind = T().lc; p++; const nm = T(); next(); if (!prog.header && nm.t === 'id') prog.header = { kind, name: nm.v }; if (isS('(')) skipParens(); acc(';'); mode = 'impl'; continue; }
+    if (isK('unit')) { p++; const nm = T(); next(); if (!prog.header && nm.t === 'id') prog.header = { kind: 'unit', name: nm.v }; while (acc('.')) next(); while (!isS(';') && T().t !== 'eof') p++; acc(';'); mode = 'intf'; continue; }
     if (isK('interface')) { p++; mode = 'intf'; continue; }
     if (isK('implementation')) { p++; mode = 'impl'; continue; }
     if (isK('initialization')) { p++; parseStmtList(['finalization', 'end']); continue; }

@@ -99,3 +99,24 @@ test('вынесенная ветвь возвращается в нужное �
   const withExit = build(program(`  if n > 0 then begin\n${body}\n    if a > 5 then exit;\n  end;`), { maxH: 150 }).diagrams[0];
   clean(withExit.G);
 });
+
+test('присваивание результата своей функции — «Предопределённый процесс» (п. 3.2.2.1)', () => {
+  const circle = programs().find((p) => p.id === 'fx:circle.pas');
+  const shapes = (G) => G.items.filter((i) => i.type === 'block' && i.shape !== 'term').map((b) => `${b.shape}:${b.text}`);
+  const [main, fn] = build(circle).diagrams;
+  assert.deepEqual(shapes(main.G), ['rect:Ввод r', 'predef:s = Ploshad(r)', 'rect:Вывод s']);
+  // внутри функции присваивание её имени — результат, а не вызов
+  assert.equal(shapes(fn.G).length, 1);
+  assert.match(shapes(fn.G)[0], /^rect:Ploshad = /);
+  // при настройке «Процесс» вызов рисуется обычным прямоугольником
+  assert.deepEqual(shapes(build(circle, { callSymbol: 'process' }).diagrams[0].G), ['rect:Ввод r', 'rect:s = Ploshad(r)', 'rect:Вывод s']);
+});
+
+test('вызов функции без скобок и рекурсия; стандартные функции не считаются вызовом подпрограммы', () => {
+  const code = 'program F;\nfunction Fact(v: integer): integer;\nbegin\n  if v <= 1 then Fact := 1 else Fact := v * Fact(v - 1);\nend;\nfunction Two: integer;\nbegin\n  Two := 2;\nend;\nvar a, b: integer; x: real;\nbegin\n  a := Two;\n  b := a + 1;\n  x := sqrt(b);\n  a := Fact(a) + 1;\nend.';
+  const diagrams = build({ id: 't', names: {}, code }).diagrams;
+  const byId = Object.fromEntries(diagrams.map(({ d, G }) => [d.id, G.items.filter((i) => i.type === 'block' && i.shape !== 'term').map((b) => b.shape)]));
+  assert.deepEqual(byId.main, ['predef', 'rect', 'predef']);
+  assert.ok(byId['r:fact'].includes('predef'), 'рекурсивный вызов');
+  assert.deepEqual(byId['r:two'], ['rect']);
+});
