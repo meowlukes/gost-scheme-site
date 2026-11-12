@@ -3,7 +3,9 @@
  * Вся геометрия и размеры приходят из оформления (gost): здесь нет размеров символов.
  */
 import { EXAMPLES } from '../core/examples.js';
+import { isSameProgram, withoutExampleNames } from '../core/names.js';
 import { CALL_SYMBOLS, CASE_STYLES, COLUMN_HEIGHT_RANGE, IO_SYMBOLS, MERGE_RANGE, defaultOptions, normalizeOptions } from '../core/options.js';
+import { parsePascal } from '../core/parser.js';
 import { autoCommentText, buildGeometry, buildProject, collectNames, commentHeight, geomBounds, makeComment, newId, renumber } from '../core/project.js';
 import { checkGeometry } from '../core/validate.js';
 import { GOST, TEXTS } from '../gost/index.js';
@@ -130,9 +132,28 @@ function syncManualTexts(id) {
   const ac = A.items.find(i => i.type === 'comment'), mc = M.items.find(i => i.type === 'comment');
   if (ac && mc && !mc.userText) mc.text = ac.text;
 }
+/** Разобранный пример — для сравнения с текущей программой. */
+const exampleProgs = new Map();
+function exampleProg(ex) {
+  if (!exampleProgs.has(ex.id)) exampleProgs.set(ex.id, parsePascal(ex.code));
+  return exampleProgs.get(ex.id);
+}
+/**
+ * Если вместо примера теперь другая программа, описания обозначений из примера ей не
+ * принадлежат: они убираются. Возвращает true, если что-то убрано.
+ */
+function detachExample() {
+  const ex = S.exId && EXAMPLES.find(e => e.id === S.exId);
+  if (!ex || !project || !project.prog || isSameProgram(project.prog, exampleProg(ex))) return false;
+  S.exId = '';
+  const kept = withoutExampleNames(S.names, ex.names);
+  const changed = Object.keys(kept).length !== Object.keys(S.names).length;
+  S.names = kept;
+  return changed;
+}
 function rebuild() {
   clearTimeout(buildT);
-  try { project = buildProject(S.code, env()); }
+  try { project = buildProject(S.code, env()); if (detachExample()) project = buildProject(S.code, env()); }
   catch (e) { project = { diagrams: [], notes: [], errors: [{ line: 1, msg: 'Не удалось разобрать программу: ' + e.message }] }; }
   geoms = {};
   for (const d of project.diagrams) if (!d.empty) { try { geoms[d.id] = buildGeometry(d, env()); } catch (e) { d.empty = true; project.errors.push({ line: d.line, msg: 'не удалось построить схему: ' + e.message }); } }
@@ -856,7 +877,7 @@ $('#fileIn').onchange = async e => {
   const buf = await f.arrayBuffer();
   let txt = new TextDecoder('utf-8', { fatal: false }).decode(buf);
   if (txt.includes('\uFFFD')) { try { txt = new TextDecoder('windows-1251').decode(buf); } catch { /* кодировка не поддерживается — оставить utf-8 */ } }
-  S.code = txt; S.exId = ''; S.edits = {}; S.ifopts = {}; S.manual = {}; S.active = null; sel = null;
+  S.code = txt; S.edits = {}; S.ifopts = {}; S.manual = {}; S.active = null; sel = null;
   codeEl.value = txt; refreshEditor(); rebuild(); e.target.value = ''; toast('Открыт файл ' + f.name);
 };
 // настройки

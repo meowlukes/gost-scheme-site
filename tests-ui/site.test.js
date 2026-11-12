@@ -66,6 +66,15 @@ async function open() {
 }
 const count = (page, sel) => page.locator(sel).count();
 const status = (page) => page.locator('#status').innerText();
+/** Есть ли текст хотя бы на одной из схем (вкладок). */
+async function anyTabShows(page, re) {
+  const tabs = page.locator('#tabs button');
+  for (let i = 0; i < await tabs.count(); i++) {
+    await tabs.nth(i).click();
+    if (re.test(await page.locator('#board').innerHTML())) return true;
+  }
+  return false;
+}
 async function typeProgram(page, code) { await page.fill('#code', code); await page.waitForTimeout(BUILD_WAIT); }
 
 test('страница открывается, все примеры строятся без ошибок', async () => {
@@ -94,6 +103,23 @@ test('своя программа: case одним решением, вызов 
   await page.selectOption('#set-caseStyle', 'cascade');
   await page.waitForTimeout(300);
   assert.equal(await count(page, '#board g.lb'), 4, 'цепочка: два ромба по Да/Нет');
+  await page.context().close();
+});
+
+test('своя программа вместо примера: описания обозначений из примера не переносятся', async () => {
+  const page = await open();
+  const ids = await page.$$eval('#exampleSel option', (o) => o.map((x) => x.value).filter(Boolean));
+  // пример, в описаниях которого есть «проверяемое слово»
+  let found = false;
+  for (const id of ids) {
+    await page.selectOption('#exampleSel', id);
+    await page.waitForTimeout(300);
+    if (await anyTabShows(page, /проверяемое слово/)) { found = true; break; }
+  }
+  assert.ok(found, 'в примерах есть описание «проверяемое слово»');
+  await typeProgram(page, (await readFile(join(ROOT, 'tests', 'fixtures', 'circle.pas'), 'utf8')));
+  assert.equal(await anyTabShows(page, /проверяемое слово/), false);
+  assert.equal(await count(page, '#board g.bk path[d*="M"]'), await count(page, '#board g.bk'), 'символы на месте');
   await page.context().close();
 });
 
